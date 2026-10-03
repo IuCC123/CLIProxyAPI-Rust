@@ -19,6 +19,10 @@ use crate::upstream::{self, Target};
 
 pub type FrameStream = Pin<Box<dyn Stream<Item = Frame> + Send>>;
 
+#[cfg(test)]
+#[path = "stream_accounting_tests.rs"]
+mod stream_accounting_tests;
+
 pub struct Call {
     pub format: Format,
     pub body: Value,
@@ -48,6 +52,10 @@ pub struct Tracker {
     log: RequestLog,
     started: Instant,
     acct: Option<Arc<Account>>,
+    /// Stream progress must outlive the suspended generator when its body is dropped.
+    stream_usage: Usage,
+    stream_error: Option<(u16, String)>,
+    stream_finished: bool,
     done: bool,
 }
 
@@ -58,6 +66,9 @@ impl Tracker {
             app: app.clone(),
             started: Instant::now(),
             acct: None,
+            stream_usage: Usage::default(),
+            stream_error: None,
+            stream_finished: false,
             done: false,
             log: RequestLog {
                 id: app.stats.next_id(),
@@ -147,6 +158,26 @@ impl Tracker {
         }
     }
 
+    fn observe_stream_event(&mut self, event: &Event) {
+        match event {
+            Event::Usage(usage) => self.stream_usage.merge(usage),
+            Event::Error { status, message } => self.stream_error = Some((*status, message.clone())),
+            // A client may stop reading immediately after the terminal event. Keep
+            // consuming while it reads, since Chat can send usage after its finish reason.
+            Event::Finish(_) => self.stream_finished = true,
+            event if is_content(event) => self.first_token(),
+            _ => {}
+        }
+    }
+
+    fn finish_stream(&mut self) {
+        let usage = self.stream_usage.clone();
+        match self.stream_error.take() {
+            Some((status, message)) => self.finish(status, &usage, Some(message)),
+            None => self.finish(200, &usage, None),
+        }
+    }
+
     fn observe_quota_event(&self, data: &str) {
         if let Some(acct) = &self.acct {
             observe_quota_event(acct, &self.log.model, data);
@@ -203,7 +234,12 @@ impl Tracker {
 impl Drop for Tracker {
     fn drop(&mut self) {
         if !self.done {
-            self.finish(499, &Usage::default(), Some("client disconnected".into()));
+            if self.stream_finished || self.stream_error.is_some() {
+                self.finish_stream();
+            } else {
+                let usage = self.stream_usage.clone();
+                self.finish(499, &usage, Some("client disconnected".into()));
+            }
         }
     }
 }
@@ -936,25 +972,16 @@ fn render_stream(
 ) -> FrameStream {
     Box::pin(async_stream::stream! {
         let mut renderer = formats::renderer(format, &model, &req);
-        let mut usage = Usage::default();
-        let mut error: Option<(u16, String)> = None;
         let mut frames = Vec::new();
         while let Some(ev) = events.next().await {
-            match &ev {
-                Event::Usage(u) => usage.merge(u),
-                Event::Error { status, message } => error = Some((*status, message.clone())),
-                e if is_content(e) => tracker.first_token(),
-                _ => {}
-            }
+            tracker.observe_stream_event(&ev);
             renderer.push(&ev, &mut frames);
             for f in frames.drain(..) { yield f; }
         }
+        // Commit before yielding final frames: the client need not poll for EOF.
+        tracker.finish_stream();
         renderer.finish(&mut frames);
         for f in frames.drain(..) { yield f; }
-        match error {
-            Some((s, m)) => tracker.finish(s, &usage, Some(m)),
-            None => tracker.finish(200, &usage, None),
-        }
     })
 }
 
@@ -980,14 +1007,12 @@ fn passthrough_stream(resp: reqwest::Response, native: Format, mut tracker: Trac
         let mut body = resp.bytes_stream();
         let mut dec = SseDecoder::default();
         let mut parser = formats::parser(native);
-        let mut usage = Usage::default();
-        let mut error: Option<(u16, String)> = None;
         let mut evs = Vec::new();
         loop {
             let (batch, end) = match body.next().await {
                 Some(Ok(chunk)) => (dec.push(&chunk), false),
                 Some(Err(e)) => {
-                    error = Some((502, format!("upstream stream error: {e}")));
+                    tracker.observe_stream_event(&Event::Error { status: 502, message: format!("upstream stream error: {e}") });
                     (dec.finish(), true)
                 }
                 None => (dec.finish(), true),
@@ -996,12 +1021,7 @@ fn passthrough_stream(resp: reqwest::Response, native: Format, mut tracker: Trac
                 tracker.observe_quota_event(&sse.data);
                 parser.feed(&sse, &mut evs);
                 for ev in evs.drain(..) {
-                    match ev {
-                        Event::Usage(u) => usage.merge(&u),
-                        Event::Error { status, message } => error = Some((status, message)),
-                        e if is_content(&e) => tracker.first_token(),
-                        _ => {}
-                    }
+                    tracker.observe_stream_event(&ev);
                 }
                 let data = if unwrap {
                     serde_json::from_str::<Value>(&sse.data)
@@ -1016,10 +1036,7 @@ fn passthrough_stream(resp: reqwest::Response, native: Format, mut tracker: Trac
                 break;
             }
         }
-        match error {
-            Some((s, m)) => tracker.finish(s, &usage, Some(m)),
-            None => tracker.finish(200, &usage, None),
-        }
+        tracker.finish_stream();
     })
 }
 
