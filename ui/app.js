@@ -489,7 +489,7 @@ function meterHTML(w, label) {
 }
 
 const ROUTING = {
-  'smart-quota': 'New sessions balance weekly resets, 5-hour quota and account load',
+  'smart-quota': 'New sessions drain the earliest weekly reset, reserving quota for active sessions',
   'least-used': 'New sessions use the account with the most quota left',
   'round-robin': 'New sessions take turns across accounts',
   'fill-first': 'New sessions use the first available account',

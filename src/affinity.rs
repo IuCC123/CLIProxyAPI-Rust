@@ -612,9 +612,54 @@ mod tests {
     }
 
     #[test]
+    fn smart_reserve_admits_idle_accounts_and_releases_after_completion_or_inactivity() {
+        for window in [0, 1] {
+            let (cfg, pool) = smart_pool();
+            let accounts = pool.all();
+            accounts[0].state.lock().quota.windows[window].used = if window == 0 { 80.0 } else { 96.0 };
+            let sessions = Arc::new(Sessions::memory());
+            let pick = |task| sessions.pick(&pool, &cfg, "gpt-6.1-sol", Some(task), &[], None).unwrap().0;
+            assert_eq!(pick("first").id, accounts[0].id); // idle account can consume its reserve
+            assert_eq!(pick("second").id, accounts[1].id); // protect the first session from new work
+            assert_eq!(pick("first").id, accounts[0].id); // the existing session keeps its cache
+
+            let lease = sessions.hold("first", cfg.session_affinity_idle_seconds);
+            sessions
+                .registry
+                .lock()
+                .bindings
+                .values_mut()
+                .filter(|b| b.account == accounts[0].id)
+                .for_each(|b| b.last_seen -= LOAD_IDLE_SECONDS + 1);
+            assert_eq!(pick("while-streaming").id, accounts[1].id); // long streams remain active
+            drop(lease);
+            sessions.end("first");
+            assert_eq!(pick("after-completion").id, accounts[0].id); // explicit completion releases the reserve
+            assert_eq!(pick("after-admission").id, accounts[1].id);
+
+            sessions
+                .registry
+                .lock()
+                .bindings
+                .values_mut()
+                .filter(|b| b.account == accounts[0].id)
+                .for_each(|b| b.last_seen -= LOAD_IDLE_SECONDS + 1);
+            assert_eq!(pick("after-inactivity").id, accounts[0].id); // old pins do not reserve quota
+            assert_eq!(pick("after-completion").id, accounts[0].id); // the older affinity survives inactivity
+
+            let unbound = Sessions::memory();
+            let request = crate::accounts::RequestLoad::new(&accounts[0]);
+            assert_eq!(unbound.pick(&pool, &cfg, "gpt-6.1-sol", None, &[], None).unwrap().0.id, accounts[1].id);
+            drop(request);
+            assert_eq!(unbound.pick(&pool, &cfg, "gpt-6.1-sol", None, &[], None).unwrap().0.id, accounts[0].id);
+        }
+    }
+
+    #[test]
     fn smart_reserve_boundaries_unknown_quota_and_expired_windows() {
         let (mut cfg, pool) = smart_pool();
         let accounts = pool.all();
+        let _request = crate::accounts::RequestLoad::new(&accounts[0]);
         let pick = |cfg: &Config| {
             Sessions::memory().pick(&pool, cfg, "gpt-6.1-sol", Some("new"), &[], None).unwrap().0.id.clone()
         };
@@ -629,7 +674,7 @@ mod tests {
         accounts[1].state.lock().quota.windows[0].used = 70.0;
         assert_eq!(pick(&cfg), accounts[0].id); // exactly the reserve remains eligible
         accounts[0].state.lock().quota.windows.remove(0);
-        assert_eq!(pick(&cfg), accounts[1].id); // known healthy quota beats unknown
+        assert_eq!(pick(&cfg), accounts[0].id); // no five-hour reserve is invented for missing data
         accounts[1].state.lock().quota.windows.remove(0);
         assert_eq!(pick(&cfg), accounts[0].id); // both unknown: renewal priority still works
         accounts[0].state.lock().quota.windows.push(crate::quota::Window {
@@ -644,32 +689,45 @@ mod tests {
     }
 
     #[test]
-    fn simultaneous_smart_assignments_spread_before_quota_changes() {
+    fn simultaneous_smart_assignments_pack_the_earliest_healthy_week() {
         let (cfg, pool) = smart_pool();
         let sessions = Sessions::memory();
-        let barrier = std::sync::Barrier::new(24);
-        let assignments = std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..24)
-                .map(|i| {
-                    let (cfg, pool, sessions, barrier) = (&cfg, &pool, &sessions, &barrier);
-                    scope.spawn(move || {
-                        let task = format!("parallel-{i}");
-                        barrier.wait();
-                        let account = sessions.pick(pool, cfg, "gpt-6.1-sol", Some(&task), &[], None).unwrap().0;
-                        (task, account.id.clone())
+        let assign = |sessions: &Sessions| {
+            let barrier = std::sync::Barrier::new(24);
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..24)
+                    .map(|i| {
+                        let (cfg, pool, barrier) = (&cfg, &pool, &barrier);
+                        scope.spawn(move || {
+                            let task = format!("parallel-{i}");
+                            barrier.wait();
+                            let account = sessions.pick(pool, cfg, "gpt-6.1-sol", Some(&task), &[], None).unwrap().0;
+                            (task, account.id.clone())
+                        })
                     })
-                })
-                .collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
-        });
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+            })
+        };
+        let assignments = assign(&sessions);
         let accounts = pool.all();
         let early = assignments.iter().filter(|(_, id)| *id == accounts[0].id).count();
-        let later = assignments.len() - early;
-        assert!(early > later, "earlier renewal should receive more sessions: {early}/{later}");
-        assert!(later >= 8, "new sessions must spread before quota updates: {early}/{later}");
+        assert_eq!(early, assignments.len(), "session count must not outweigh the earlier reset");
+        accounts[0].state.lock().quota.windows[1].used = 96.0;
+        assert_eq!(
+            sessions.pick(&pool, &cfg, "gpt-6.1-sol", Some("after-draining"), &[], None).unwrap().0.id,
+            accounts[1].id
+        );
         for (task, id) in assignments {
             assert_eq!(sessions.pick(&pool, &cfg, "gpt-6.1-sol", Some(&task), &[], None).unwrap().0.id, id);
         }
+        let idle = Sessions::memory();
+        let assignments = assign(&idle);
+        assert_eq!(
+            assignments.iter().filter(|(_, id)| *id == accounts[0].id).count(),
+            1,
+            "one new session may drain an idle reserve; later assignments must protect it"
+        );
     }
 
     #[test]

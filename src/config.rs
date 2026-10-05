@@ -29,7 +29,7 @@ pub struct Config {
     pub request_retry: u32,
     /// How new sessions choose an account.
     pub routing: Routing,
-    /// Smart routing prefers other accounts below this 5-hour remaining percentage.
+    /// Smart routing reserves this 5-hour remaining percentage for active/recent sessions.
     #[serde(deserialize_with = "percentage")]
     pub five_hour_reserve_percent: u8,
     /// Keep each coding session on its account until subscription quota is exhausted.
@@ -77,7 +77,7 @@ pub enum Routing {
     /// The account with the most subscription quota left (falls back to round-robin).
     #[default]
     LeastUsed,
-    /// Balance weekly renewal priority, 5-hour headroom and current account load.
+    /// Drain the earliest eligible weekly renewal; quota and load break close ties.
     SmartQuota,
     RoundRobin,
     FillFirst,

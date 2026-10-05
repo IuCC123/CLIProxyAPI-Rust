@@ -138,12 +138,12 @@ function configRoutingHTML() {
   const strategy = configGet(['routing']);
   const what = configGet(['session-affinity']) ? 'new sessions' : 'requests';
   const help = { 'least-used': `Send ${what} to the account with the most subscription quota remaining. Falls back to round robin when quota is unavailable.`,
-    'smart-quota': `Spread ${what} by quota left and current load, favouring accounts whose weekly limit renews sooner and avoiding ones nearly out of their week.`,
+    'smart-quota': `Send ${what} to the earliest weekly reset. Below the reserves, prefer other accounts while sessions are active; idle accounts can use their remaining quota. Resets within an hour compete on quota and load.`,
     'round-robin': `Rotate ${what} across available accounts.`, 'fill-first': `Send ${what} to the first available account until it cannot serve them, then the next.` }[strategy];
   return `<h2>Routing</h2><div class="cfg-grid">
     ${configSelect(['routing'], 'Account selection', [['least-used', 'Most quota remaining'], ['smart-quota', 'Smart quota balancing'], ['round-robin', 'Round robin'], ['fill-first', 'Fill first']], { help })}
     ${strategy === 'smart-quota' ? configField(['five-hour-reserve-percent'], '5-hour reserve for existing sessions (%)', { type: 'number', min: 0, max: 100, required: true,
-      help: `Below this level, prefer other accounts for ${what}. Remaining quota can still be used when all accounts are below their reserve. Default: 30%. Set 0 to turn off the reserve.` }) : ''}
+      help: `Below this level (or 5% weekly quota left), prefer other accounts for ${what} while this account has an in-flight request or a session used in the last five minutes. Idle accounts can admit a session to drain remaining quota. If every account needs its reserve, usable quota remains available. Default: 30%. Set 0 to turn off the 5-hour reserve.` }) : ''}
     ${configField(['request-retry'], 'Account attempts', { type: 'number', min: 0, max: 4294967295, required: true,
       help: 'Maximum accounts to try before a request fails. Zero still tries one account.' })}</div>
     <div class="cfg-divider"></div>${configSwitch(['session-affinity'], 'Keep sessions on one account', 'A coding session stays on the account it started on, so its prompt cache keeps working. It moves when that subscription runs out or the account is disabled; while an account is busy, its requests briefly use another.')}

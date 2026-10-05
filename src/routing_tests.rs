@@ -486,7 +486,7 @@ async fn client_ping(
 }
 
 #[tokio::test]
-async fn smart_balancing_uses_reserve_and_session_load_over_http_and_websockets() {
+async fn smart_balancing_packs_earlier_resets_and_respects_reserve_over_http_and_websockets() {
     for native in [false, true] {
         let fixture = Fixture::new(Routing::SmartQuota, native).await;
         let accounts = fixture.app.pool.all();
@@ -516,7 +516,7 @@ async fn smart_balancing_uses_reserve_and_session_load_over_http_and_websockets(
         assert_eq!(answer(&first.1), "a");
         let mut socket = fixture.socket("ws-second").await;
         turn(&mut socket, prompt()).await;
-        assert_eq!(fixture.mock.calls.lock().last().unwrap().0, "b"); // new load counts before quota moves
+        assert_eq!(fixture.mock.calls.lock().last().unwrap().0, "a"); // load does not outweigh the earlier reset
         assert_eq!(answer(&fixture.request(Some("http-first"), prompt()).await.1), "a");
 
         // Change the reserve at runtime without disturbing either existing assignment.
@@ -527,12 +527,69 @@ async fn smart_balancing_uses_reserve_and_session_load_over_http_and_websockets(
         assert_eq!(answer(&fixture.request(Some("new-after-reserve"), prompt()).await.1), "b");
         assert_eq!(answer(&fixture.request(Some("http-first"), prompt()).await.1), "a");
         turn(&mut socket, prompt()).await;
-        assert_eq!(fixture.mock.calls.lock().last().unwrap().0, "b");
+        assert_eq!(fixture.mock.calls.lock().last().unwrap().0, "a"); // the existing WebSocket remains pinned
 
         let logs = fixture.logs(6).await;
         assert!(logs.iter().all(|log| log.routing_strategy == Routing::SmartQuota));
         assert!(accounts.iter().all(|a| a.state.lock().active_requests.load(Ordering::Relaxed) == 0));
         socket.close(None).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn smart_reserve_admits_idle_accounts_and_releases_on_session_end_over_http_and_websockets() {
+    for native in [false, true] {
+        for window in [0, 1] {
+            let fixture = Fixture::new(Routing::SmartQuota, native).await;
+            let accounts = fixture.app.pool.all();
+            let now = chrono::Utc::now();
+            for (account, days) in accounts.iter().zip([3, 5]) {
+                account.state.lock().quota = crate::quota::Quota {
+                    windows: vec![
+                        crate::quota::Window {
+                            name: "5h".into(),
+                            used: 0.0,
+                            resets_at: Some(now + chrono::Duration::hours(4)),
+                            model: None,
+                        },
+                        crate::quota::Window {
+                            name: "week".into(),
+                            used: 20.0,
+                            resets_at: Some(now + chrono::Duration::days(days)),
+                            model: None,
+                        },
+                    ],
+                    updated_at: Some(now),
+                    ..Default::default()
+                };
+            }
+            accounts[0].state.lock().quota.windows[window].used = if window == 0 { 80.0 } else { 96.0 };
+            assert_eq!(answer(&fixture.request(Some("idle-admission"), prompt()).await.1), "a");
+            let mut socket = fixture.socket("additional-session").await;
+            turn(&mut socket, prompt()).await;
+            assert_eq!(fixture.mock.calls.lock().last().unwrap().0, "b");
+            assert_eq!(answer(&fixture.request(Some("idle-admission"), prompt()).await.1), "a");
+
+            let response = reqwest::Client::new()
+                .post(format!("{}/v1/responses", fixture.proxy.url))
+                .bearer_auth("client-one")
+                .header("thread-id", "idle-admission")
+                .header("x-cliproxy-session-end", "true")
+                .json(&prompt())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(answer(&response.json::<Value>().await.unwrap()), "a");
+            assert_eq!(answer(&fixture.request(Some("after-session-end"), prompt()).await.1), "a");
+            turn(&mut socket, prompt()).await;
+            assert_eq!(fixture.mock.calls.lock().last().unwrap().0, "b");
+            let logs = fixture.logs(6).await;
+            assert_eq!(logs[0].routing_reason, Some("new_session"));
+            assert_eq!(logs[2].routing_reason, Some("session_reused"));
+            assert_eq!(logs[4].routing_reason, Some("new_session"));
+            socket.close(None).await.unwrap();
+        }
     }
 }
 
