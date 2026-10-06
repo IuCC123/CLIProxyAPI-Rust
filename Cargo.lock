@@ -434,6 +434,7 @@ version = "0.3.2"
 dependencies = [
  "anyhow",
  "arc-swap",
+ "async-compression",
  "async-stream",
  "axum",
  "axum-server",
@@ -446,6 +447,7 @@ dependencies = [
  "fs2",
  "futures",
  "hex",
+ "http-body-util",
  "open",
  "parking_lot",
  "rand 0.9.5",
@@ -458,12 +460,15 @@ dependencies = [
  "sha2",
  "tokio",
  "tokio-tungstenite 0.27.0",
+ "tokio-util",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
  "url",
  "uuid",
  "yaml-edit",
+ "zstd",
 ]
 
 [[package]]
