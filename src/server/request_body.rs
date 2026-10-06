@@ -17,8 +17,10 @@ use crate::state::App;
 
 pub(super) const MAX_BODY_SIZE: usize = 256 << 20;
 
-// This runs after client_auth. Bound the encoded stream too, since a decoder
-// can consume bytes without producing output.
+/// Validate POST encodings and bound compressed input after client authentication.
+///
+/// Accept one identity, gzip, or zstd encoding. Other methods pass through unread.
+/// Bound input before decoding because a decoder can consume bytes without output.
 pub(super) async fn encoded_body(State(app): State<Arc<App>>, mut req: Request, next: Next) -> Response {
     if req.method() != Method::POST {
         return next.run(req).await;
@@ -40,8 +42,10 @@ pub(super) async fn encoded_body(State(app): State<Arc<App>>, mut req: Request, 
     next.run(decode_body(limit_encoded_body(req, MAX_BODY_SIZE))).await
 }
 
-// decode_body strips the encoded Content-Length and Content-Encoding.
-// Collect with a second bound before any handler can parse or forward the body.
+/// Collect decoded POST bodies within the output limit before handlers run.
+///
+/// Record size and decoding failures without selecting or contacting a provider.
+/// Other methods pass through unread, preserving WebSocket upgrade behavior.
 pub(super) async fn decoded_body(State(app): State<Arc<App>>, req: Request, next: Next) -> Response {
     if req.method() != Method::POST {
         return next.run(req).await;
@@ -54,11 +58,15 @@ pub(super) async fn decoded_body(State(app): State<Arc<App>>, req: Request, next
     }
 }
 
+/// Limit incoming body bytes independently of the decompressed output size.
 fn limit_encoded_body(req: Request, limit: usize) -> Request {
     let (parts, body) = req.into_parts();
     Request::from_parts(parts, Body::new(Limited::new(body, limit)))
 }
 
+/// Stream a validated gzip or zstd body and remove its encoded representation headers.
+///
+/// Read every member or frame so trailing data and corruption reach the collector.
 fn decode_body(req: Request) -> Request {
     let encoding = req.headers().get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok());
     if !matches!(encoding, Some("gzip" | "zstd")) {
@@ -83,6 +91,7 @@ fn decode_body(req: Request) -> Request {
     Request::from_parts(parts, body)
 }
 
+/// Collect a body, mapping either size limit to 413 and other stream failures to 400.
 async fn read_body(body: Body, limit: usize) -> Result<Bytes, (u16, &'static str)> {
     to_bytes(body, limit).await.map_err(|error| {
         let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);

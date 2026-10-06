@@ -21,6 +21,7 @@ use crate::state::App;
 
 mod request_body;
 
+/// Build API routes with authentication before bounded decoding and body extraction.
 pub fn router(app: Arc<App>) -> Router {
     let api = Router::new()
         .route("/v1/chat/completions", post(chat))
@@ -94,6 +95,7 @@ fn format_for_path(path: &str) -> Format {
 
 // -------------------------------------------------------------------- handlers
 
+/// Parse a decoded JSON object and record malformed or non-object input as a request failure.
 fn parse_body(app: &Arc<App>, format: Format, body: &Bytes) -> Result<Value, Box<Response>> {
     serde_json::from_slice::<Value>(body)
         .ok()
@@ -101,12 +103,14 @@ fn parse_body(app: &Arc<App>, format: Format, body: &Bytes) -> Result<Value, Box
         .ok_or_else(|| Box::new(body_error(app, format, 400, "request body must be a JSON object")))
 }
 
+/// Record a body rejection with zero provider attempts and return the format-specific error.
 fn body_error(app: &Arc<App>, format: Format, status: u16, message: &str) -> Response {
     let mut tracker = proxy::Tracker::new(app, format, false, "http", "");
     tracker.finish(status, &crate::ir::Usage::default(), Some(message.into()));
     reply(format, Reply::Error(status, formats::error_body(format, status, message)), false)
 }
 
+/// Validate a decoded text-generation body, execute it, and format the HTTP response.
 async fn run(app: Arc<App>, format: Format, headers: HeaderMap, body: Bytes) -> Response {
     let body = match parse_body(&app, format, &body) {
         Ok(v) => v,
@@ -154,6 +158,7 @@ fn outcome(o: crate::media::Outcome) -> Response {
     }
 }
 
+/// Validate decoded JSON before submitting an image-generation request.
 async fn image_generations(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> Response {
     match parse_body(&app, Format::Chat, &body) {
         Ok(v) => outcome(crate::media::images(app, headers, v, false).await),
@@ -161,6 +166,7 @@ async fn image_generations(State(app): State<Arc<App>>, headers: HeaderMap, body
     }
 }
 
+/// Convert a decoded multipart or JSON body into an image-edit request.
 async fn image_edits(State(app): State<Arc<App>>, req: Request) -> Response {
     let headers = req.headers().clone();
     let multipart =
@@ -187,6 +193,7 @@ async fn image_edits(State(app): State<Arc<App>>, req: Request) -> Response {
     outcome(crate::media::images(app, headers, body, true).await)
 }
 
+/// Validate the video operation and decoded JSON before submitting a media request.
 async fn video_create(
     State(app): State<Arc<App>>,
     Path(kind): Path<String>,
@@ -206,6 +213,7 @@ async fn video_status(State(app): State<Arc<App>>, Path(id): Path<String>, heade
     outcome(crate::media::video_status(app, headers, id).await)
 }
 
+/// Validate decoded JSON before forwarding a Responses compaction request.
 async fn compact(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> Response {
     match parse_body(&app, Format::Responses, &body) {
         Ok(v) => outcome(crate::media::compact(app, headers, v).await),
@@ -294,6 +302,7 @@ async fn completions(State(app): State<Arc<App>>, headers: HeaderMap, body: Byte
     }
 }
 
+/// Validate decoded JSON before counting tokens in the Claude request format.
 async fn count_tokens(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> Response {
     match parse_body(&app, Format::Claude, &body) {
         Ok(v) => axum::Json(proxy::count_tokens(app, headers, v).await).into_response(),
@@ -301,6 +310,7 @@ async fn count_tokens(State(app): State<Arc<App>>, headers: HeaderMap, body: Byt
     }
 }
 
+/// Dispatch Gemini generation or token-count actions from the URL and decoded JSON body.
 async fn gemini(
     State(app): State<Arc<App>>,
     Path(rest): Path<String>,

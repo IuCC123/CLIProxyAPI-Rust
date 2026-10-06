@@ -18,6 +18,7 @@ struct Fixture {
 }
 
 impl Fixture {
+    /// Create an isolated application with an empty temporary account directory.
     fn new() -> Self {
         let dir = std::env::temp_dir().join(format!("cliproxy-body-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -26,6 +27,7 @@ impl Fixture {
         Self { dir, app }
     }
 
+    /// Check that one failure was recorded with no account, provider attempt, or token usage.
     fn assert_rejection(&self, status: u16) {
         let recent = self.app.stats.recent.lock();
         assert_eq!(recent.len(), 1);
@@ -43,11 +45,13 @@ impl Fixture {
 }
 
 impl Drop for Fixture {
+    /// Remove the temporary account directory after each test.
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
+/// Build a gzip, zstd, or uncompressed fixture body.
 fn encode(encoding: &str, body: &[u8]) -> Vec<u8> {
     match encoding {
         "zstd" => zstd::stream::encode_all(body, 3).unwrap(),
@@ -60,6 +64,7 @@ fn encode(encoding: &str, body: &[u8]) -> Vec<u8> {
     }
 }
 
+/// Send a JSON POST through the full API router and collect its JSON response.
 async fn request(app: Arc<App>, path: &str, encoding: Option<&str>, body: Vec<u8>) -> (StatusCode, Value) {
     let mut req = Request::builder()
         .method("POST")
@@ -75,6 +80,7 @@ async fn request(app: Arc<App>, path: &str, encoding: Option<&str>, body: Vec<u8
     (status, serde_json::from_slice(&body).unwrap())
 }
 
+/// Check that all supported encodings reach JSON validation on each text-generation route.
 #[tokio::test]
 async fn compressed_json_reaches_all_json_routes() {
     for path in [
@@ -95,6 +101,7 @@ async fn compressed_json_reaches_all_json_routes() {
     }
 }
 
+/// Check that corrupt and truncated streams fail before any provider attempt.
 #[tokio::test]
 async fn corrupt_or_truncated_compression_is_logged_without_forwarding() {
     for encoding in ["gzip", "zstd"] {
@@ -112,6 +119,7 @@ async fn corrupt_or_truncated_compression_is_logged_without_forwarding() {
     }
 }
 
+/// Check that decoded non-object or malformed JSON retains the tracked 400 response.
 #[tokio::test]
 async fn invalid_json_objects_remain_rejected_and_are_logged() {
     for encoding in ["identity", "zstd", "gzip"] {
@@ -126,6 +134,7 @@ async fn invalid_json_objects_remain_rejected_and_are_logged() {
     }
 }
 
+/// Check that unsupported, stacked, and repeated encoding headers produce tracked 415 errors.
 #[tokio::test]
 async fn unsupported_or_stacked_encodings_are_rejected_and_logged() {
     for encoding in ["br", "deflate", "gzip, zstd", "", "identity, gzip"] {
@@ -148,6 +157,7 @@ async fn unsupported_or_stacked_encodings_are_rejected_and_logged() {
     fixture.assert_rejection(415);
 }
 
+/// Check that missing credentials reject a corrupt body before decoding or failure tracking.
 #[tokio::test]
 async fn authentication_runs_before_body_decoding() {
     let fixture = Fixture::new();
@@ -160,6 +170,7 @@ async fn authentication_runs_before_body_decoding() {
     assert!(fixture.app.stats.recent.lock().is_empty());
 }
 
+/// Collect a decoded body with a small test limit and expose the resulting status.
 async fn bounded_probe(req: Request) -> (StatusCode, String) {
     match read_body(req.into_body(), 64).await {
         Ok(body) => (StatusCode::OK, String::from_utf8(body.to_vec()).unwrap()),
@@ -167,6 +178,7 @@ async fn bounded_probe(req: Request) -> (StatusCode, String) {
     }
 }
 
+/// Exercise independent input and output limits, including an exact-limit identity body.
 #[tokio::test]
 async fn both_encoded_and_decoded_streams_have_size_limits() {
     let router = Router::new().route("/", post(bounded_probe));
@@ -196,6 +208,7 @@ async fn both_encoded_and_decoded_streams_have_size_limits() {
     assert_eq!(router.oneshot(decode_body(limit_encoded_body(req, 64))).await.unwrap().status(), StatusCode::OK);
 }
 
+/// Verify decoded JSON and fresh content length at a local mock Codex provider.
 #[tokio::test]
 async fn decoded_json_is_forwarded_without_stale_encoding_headers() {
     let upstream = Router::new().route("/responses", post(|headers: HeaderMap, Json(body): Json<Value>| async move {
@@ -227,6 +240,7 @@ async fn decoded_json_is_forwarded_without_stale_encoding_headers() {
     task.abort();
 }
 
+/// Check that concatenated gzip members and zstd frames form one complete JSON body.
 #[tokio::test]
 async fn concatenated_members_are_decoded_completely() {
     for encoding in ["gzip", "zstd"] {
@@ -239,6 +253,7 @@ async fn concatenated_members_are_decoded_completely() {
     }
 }
 
+/// Check that invalid trailing data cannot hide behind a valid first member or frame.
 #[tokio::test]
 async fn trailing_corruption_or_truncated_next_member_is_rejected() {
     for encoding in ["gzip", "zstd"] {
@@ -258,6 +273,7 @@ async fn trailing_corruption_or_truncated_next_member_is_rejected() {
     }
 }
 
+/// Check that GET completes even when its body never yields bytes and its encoding is unsupported.
 #[tokio::test]
 async fn get_routes_do_not_read_or_decode_request_bodies() {
     let fixture = Fixture::new();
