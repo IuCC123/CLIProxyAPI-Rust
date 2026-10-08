@@ -456,7 +456,6 @@ pub fn codex_headers(client: &HeaderMap, token: &str, account_id: Option<&str>, 
         "x-codex-beta-features",
         "x-client-request-id",
         "x-codex-window-id",
-        "x-openai-internal-codex-responses-lite",
     ] {
         if let Some(v) = header(client, name) {
             h.push((name.into(), v));
@@ -870,6 +869,16 @@ mod tests {
         cloak_body(&mut body, &acct, None, false);
         assert_eq!(body["system"][2]["text"], "<system-reminder>\ninstructions\n</system-reminder>");
         assert_eq!(body["system"][2]["cache_control"], json!({"type":"ephemeral","ttl":"1h"}));
+    }
+
+    #[test]
+    fn codex_headers_exclude_internal_lite_backend_selection() {
+        let mut client = HeaderMap::new();
+        client.insert("x-openai-internal-codex-responses-lite", "true".parse().unwrap());
+        client.insert("session_id", "search-session".parse().unwrap());
+        let headers = codex_headers(&client, "test-token", Some("test-account"), true);
+        assert!(!headers.iter().any(|(name, _)| name == "x-openai-internal-codex-responses-lite"));
+        assert!(headers.iter().any(|(name, value)| name == "session_id" && value == "search-session"));
     }
 
     #[test]
