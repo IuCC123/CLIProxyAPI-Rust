@@ -405,12 +405,19 @@ async fn applied_reset_survives_refresh_failure_and_preserves_other_cooldowns() 
     );
 }
 #[test]
+/// Verify that a reset clears exhaustion the proxy detected.
 fn a_reset_clears_exhaustion_the_proxy_detected() {
     let (_temp, app, acct) = fixture(Provider::Claude, 1);
     let body =
         r#"{"error":{"type":"rate_limit_error","code":"usage_limit_reached","message":"You've hit your usage limit"}}"#;
     assert!(crate::proxy::quota_exhausted(&acct, "claude-sonnet-5-5", 429, body));
-    crate::proxy::mark_quota_exhausted(&acct, "claude-sonnet-5-5", &reqwest::header::HeaderMap::new(), body);
+    crate::proxy::mark_quota_exhausted(
+        &acct,
+        "claude-sonnet-5-5",
+        &reqwest::header::HeaderMap::new(),
+        body,
+        acct.quota_epoch(),
+    );
     assert!(acct.exhausted_until("claude-sonnet-5-5").is_some());
     assert!(acct.cooling_until("claude-sonnet-5-5").is_some());
     // Applying a reset and reading fresh usage makes the account routable again.
@@ -421,6 +428,70 @@ fn a_reset_clears_exhaustion_the_proxy_detected() {
     reconcile(&app, &acct, "account-1", &usage);
     assert!(acct.exhausted_until("claude-sonnet-5-5").is_none());
     assert!(acct.cooling_until("claude-sonnet-5-5").is_none());
+}
+
+#[test]
+/// Verify that delayed quota error after reset cannot restore cooldown or notification evidence.
+fn delayed_quota_error_after_reset_cannot_restore_cooldown_or_notification_evidence() {
+    let (_temp, app, acct) = fixture(Provider::Claude, 1);
+    acct.state.lock().notifications_enabled = true;
+    let epoch = acct.quota_epoch();
+    let guard = QuotaGuard::new(&app, &acct, "account-1");
+    guard.invalidate(&["5h".into()]);
+    drop(guard);
+    let usage = json!({"five_hour":{"utilization":0,"resets_at":"2099-01-01T00:00:00Z"},"seven_day":{"utilization":10,"resets_at":"2099-01-01T00:00:00Z"}});
+    reconcile(&app, &acct, "account-1", &usage);
+    let sequence = acct.state.lock().notification_evidence.sequence;
+    let body = r#"{"error":{"code":"usage_limit_reached","message":"You've hit your usage limit"}}"#;
+    crate::proxy::mark_quota_exhausted(&acct, "claude-sonnet-5-5", &reqwest::header::HeaderMap::new(), body, epoch);
+    {
+        let state = acct.state.lock();
+        assert!(state.quota_cooldowns.is_empty());
+        assert_eq!(state.notification_evidence.sequence, sequence);
+        assert!(state.quota.windows.iter().all(|w| w.used < 100.0));
+    }
+    crate::proxy::mark_quota_exhausted(
+        &acct,
+        "claude-sonnet-5-5",
+        &reqwest::header::HeaderMap::new(),
+        body,
+        acct.quota_epoch(),
+    );
+    let state = acct.state.lock();
+    assert!(!state.quota_cooldowns.is_empty());
+    assert!(state.notification_evidence.sequence > sequence);
+}
+
+#[test]
+/// Verify that disabling and reenabling account invalidates inflight quota errors.
+fn disabling_and_reenabling_account_invalidates_inflight_quota_errors() {
+    let (_temp, app, acct) = fixture(Provider::Claude, 1);
+    let epoch = acct.quota_epoch();
+    let path = acct.path.as_ref().unwrap();
+    let body = r#"{"error":{"code":"usage_limit_reached","message":"You've hit your usage limit"}}"#;
+    crate::accounts::set_file_disabled(path, true).unwrap();
+    app.reload_accounts();
+    assert!(acct.state.lock().disabled);
+    assert!(acct.quota_epoch() > epoch);
+    crate::proxy::mark_quota_exhausted(
+        &acct,
+        "claude-sonnet-5-5",
+        &reqwest::header::HeaderMap::new(),
+        body,
+        acct.quota_epoch(),
+    );
+    assert!(acct.state.lock().quota_cooldowns.is_empty());
+    crate::accounts::set_file_disabled(path, false).unwrap();
+    app.reload_accounts();
+    assert!(!acct.state.lock().disabled);
+    let mut state = acct.state.lock();
+    state.notifications_enabled = true;
+    let sequence = state.notification_evidence.sequence;
+    drop(state);
+    crate::proxy::mark_quota_exhausted(&acct, "claude-sonnet-5-5", &reqwest::header::HeaderMap::new(), body, epoch);
+    let state = acct.state.lock();
+    assert!(state.quota_cooldowns.is_empty());
+    assert_eq!(state.notification_evidence.sequence, sequence);
 }
 
 #[test]

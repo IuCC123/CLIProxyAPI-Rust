@@ -43,6 +43,8 @@ pub struct Config {
     /// Check Claude and ChatGPT subscriptions for banked rate-limit resets and allow
     /// spending them from the dashboard. Off by default: it uses unofficial endpoints.
     pub banked_resets: bool,
+    /// Subscription exhaustion and confirmed recovery alerts; credentials live outside YAML.
+    pub notifications: crate::notifications::Config,
     pub debug: bool,
     /// Serve HTTPS with this certificate.
     #[serde(skip_serializing_if = "Tls::is_off")]
@@ -200,6 +202,7 @@ impl ModelAlias {
 }
 
 impl Default for Config {
+    /// Initialize opt-in features as disabled and preserve the existing server defaults.
     fn default() -> Self {
         Self {
             host: default_host(),
@@ -217,6 +220,7 @@ impl Default for Config {
             codex_websockets: true,
             claude_cloak: true,
             banked_resets: false,
+            notifications: crate::notifications::Config::default(),
             debug: false,
             tls: Tls::default(),
             force_model_prefix: false,
@@ -256,6 +260,14 @@ session-affinity-idle-seconds: 86400 # expire assignments after a day without re
 codex-websockets: true      # native upstream websocket for Codex websocket clients
 claude-cloak: true          # make non-Claude-Code clients look like Claude Code on OAuth accounts
 banked-resets: false        # show and spend banked Claude/ChatGPT limit resets (unofficial endpoints)
+notifications:
+  enabled: false            # configure destinations under Config → Notifications
+  time-zone: UTC            # IANA time zone for message timestamps; e.g. America/Denver
+  provider-logos: true      # bundled logo thumbnails for Discord alerts
+  credential-ui-enabled: false # opt in under Config → Notifications before entering secrets
+  credential-public-url: ""  # public HTTPS dashboard origin for remote credential entry; e.g. https://proxy.example.net
+  credential-proxy-cidrs: [] # optional advanced proxy compatibility; startup-only, never trust all clients
+  destinations: []          # add credentials in the dashboard; private files/environment also supported
 debug: false
 
 # API keys (optional). Accounts (Claude, Codex, Antigravity, Kimi, xAI, Meta, Devin, Vertex)
@@ -326,6 +338,7 @@ impl Config {
         Self::parse(&text)
     }
 
+    /// Parse compatible YAML and validate routing plus notification configuration before applying it.
     pub fn parse(text: &str) -> Result<Self> {
         if text.trim().is_empty() {
             return Ok(Self::default());
@@ -333,6 +346,7 @@ impl Config {
         let mut doc: Yaml = serde_yaml::from_str(text).context("invalid config")?;
         let ignored = crate::compat::normalize(&mut doc);
         let mut cfg: Config = serde_yaml::from_value(doc).context("invalid config")?;
+        cfg.notifications.validate().map_err(anyhow::Error::msg)?;
         cfg.ignored = ignored;
         Ok(cfg)
     }

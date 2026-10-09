@@ -21,6 +21,7 @@ base64 = "0.22"
 bcrypt = "0.19"
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+chrono-tz = { version = "0.10.4", default-features = false, features = ["std"] }
 clap = { version = "4", features = ["derive", "env"] }
 flate2 = "1"
 fs2 = "0.4"

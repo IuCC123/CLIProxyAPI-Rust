@@ -707,6 +707,7 @@ pub fn apply(text: &str, changes: &Map<String, Value>) -> Result<(String, Config
     Ok((output, cfg, rewritten))
 }
 
+/// Report changed startup-only settings, including notification secret paths and trust permissions.
 pub fn restart_fields(startup: &Config, current: &Config) -> Vec<&'static str> {
     let mut fields = Vec::new();
     if startup.host != current.host {
@@ -724,6 +725,17 @@ pub fn restart_fields(startup: &Config, current: &Config) -> Vec<&'static str> {
     if startup.debug != current.debug {
         fields.push("debug logging");
     }
+    let old = serde_json::to_value(&startup.notifications).unwrap_or_default();
+    let new = serde_json::to_value(&current.notifications).unwrap_or_default();
+    if ["secrets-dir", "private-endpoints", "ca-file", "credential-proxy-cidrs"]
+        .iter()
+        .any(|key| old[*key] != new[*key])
+    {
+        fields.push("notification credential and network permissions");
+    }
+    if startup.auth_dir != current.auth_dir {
+        fields.push("notification state directory");
+    }
     fields
 }
 
@@ -735,6 +747,52 @@ mod tests {
         let (out, cfg, rewritten) = apply(text, changes.as_object().unwrap()).unwrap();
         assert!(!rewritten, "expected a lossless edit");
         (out, cfg)
+    }
+
+    #[test]
+    /// Verify that notification edits preserve layout and operator permissions.
+    fn notification_edits_preserve_layout_and_operator_permissions() {
+        for prefix in ["", "config-version: 8\n"] {
+            let source = format!(
+                "{prefix}# Keep this deployment note\nnotifications:\n  enabled: false # operator default\n  secrets-dir: /run/notification-secrets\n  private-endpoints:\n    - host: chat.example.net\n      port: 443\n      cidrs: [10.1.2.3/32]\n  destinations: []\nplugin-setting: keep-me\n"
+            );
+            let mut notifications = values(&source).unwrap()["notifications"].clone();
+            notifications["enabled"] = json!(true);
+            notifications["time-zone"] = json!("America/Denver");
+            notifications["provider-logos"] = json!(false);
+            notifications["credential-ui-enabled"] = json!(true);
+            notifications["credential-public-url"] = json!("https://dashboard.example.test/");
+            notifications["destinations"] = json!([{"id":"ops-discord","format":"discord","enabled":true}]);
+            let (out, cfg) = edit(&source, json!({"notifications": notifications}));
+            assert!(out.contains("# Keep this deployment note"));
+            assert!(out.contains("# operator default"));
+            assert_eq!(yaml(&out).unwrap()["plugin-setting"], "keep-me");
+            assert!(cfg.notifications.enabled);
+            assert_eq!(cfg.notifications.time_zone, "America/Denver");
+            assert!(!cfg.notifications.provider_logos);
+            assert!(cfg.notifications.credential_ui_enabled);
+            assert_eq!(cfg.notifications.credential_public_url, "https://dashboard.example.test/");
+            assert_eq!(cfg.notifications.destinations[0].id, "ops-discord");
+            assert_eq!(
+                yaml(&out).unwrap()["notifications"]["private-endpoints"],
+                yaml(&source).unwrap()["notifications"]["private-endpoints"]
+            );
+            assert!(restart_fields(&Config::parse(&source).unwrap(), &cfg).is_empty());
+        }
+    }
+
+    #[test]
+    /// Verify that notification config rejects inline credentials and marks trust changes for restart.
+    fn notification_config_rejects_inline_credentials_and_marks_trust_changes_for_restart() {
+        let changes = json!({"notifications":{"enabled":true,"destinations":[{"id":"ops","format":"discord","url":"https://example.net/secret-sentinel"}]}});
+        assert!(apply("", changes.as_object().unwrap()).is_err());
+        let old = Config::default();
+        let mut current = old.clone();
+        current.notifications.secrets_dir = Some("/run/notification-secrets".into());
+        assert!(restart_fields(&old, &current).contains(&"notification credential and network permissions"));
+        current = old.clone();
+        current.notifications.credential_proxy_cidrs = vec!["192.0.2.10/32".into()];
+        assert!(restart_fields(&old, &current).contains(&"notification credential and network permissions"));
     }
 
     #[test]

@@ -10,10 +10,10 @@ use axum::Json;
 use axum::Router;
 use axum::extract::ws::{Message, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Path, Query, Request, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -278,6 +278,7 @@ pub fn parse_pasted(input: &str) -> (String, Option<String>) {
 
 // ---------------------------------------------------------------------- router
 
+/// Apply the existing management access policy to dashboard and notification routes.
 pub fn router(app: Arc<App>) -> Router<Arc<App>> {
     Router::new()
         .route("/overview", get(overview))
@@ -292,12 +293,25 @@ pub fn router(app: Arc<App>) -> Router<Arc<App>> {
         .route("/vertex", post(import_vertex))
         .route("/requests", get(requests))
         .route("/models", get(models))
+        .route("/notifications", get(notification_status))
+        .route("/notifications/{id}/test", post(test_notification))
+        .route(
+            "/notifications/{id}/credentials",
+            put(put_notification_credentials).delete(delete_notification_credentials),
+        )
         .route("/config", get(get_config).put(put_config))
         .route("/config/settings", get(get_settings).patch(patch_settings))
         .route("/login/{target}", post(login_start).get(login_status))
         .route("/login/{target}/code", post(login_code))
         .route("/live", get(live))
         .layer(middleware::from_fn_with_state(app, auth))
+        .layer(middleware::from_fn(notification_no_store))
+}
+/// Prevent intermediaries and browsers from caching notification management responses.
+async fn notification_no_store(req: Request, next: Next) -> Response {
+    let sensitive = req.uri().path().ends_with("/credentials") || req.uri().path() == "/notifications";
+    let response = next.run(req).await;
+    if sensitive { no_store(response) } else { response }
 }
 
 async fn auth(
@@ -426,6 +440,7 @@ struct ToggleBody {
     disabled: bool,
 }
 
+/// Persist account activation and invalidate quota responses and notification evidence captured before a toggle.
 async fn toggle_account(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Json<ToggleBody>) -> Response {
     let Some(acct) = app.pool.get(&id) else { return err(StatusCode::NOT_FOUND, "unknown account") };
     if let Some(path) = &acct.path
@@ -433,7 +448,15 @@ async fn toggle_account(State(app): State<Arc<App>>, Path(id): Path<String>, Jso
     {
         return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     }
-    acct.state.lock().disabled = b.disabled;
+    {
+        let mut st = acct.state.lock();
+        if st.disabled != b.disabled {
+            st.quota_epoch += 1;
+            st.notifications_changed_at = Some(chrono::Utc::now());
+            st.notification_evidence = Default::default();
+        }
+        st.disabled = b.disabled;
+    }
     app.broadcast("accounts", Value::Null);
     ok()
 }
@@ -625,6 +648,7 @@ fn keep_original(app: &App, text: &str) {
     }
 }
 
+/// Validate and persist a config edit under the shared config lock before reloading accounts.
 fn edit_config(app: &Arc<App>, edit: impl FnOnce(&mut serde_yaml::Value)) -> Response {
     let _guard = app.config_write.lock();
     let text = match std::fs::read_to_string(&app.cfg_path) {
@@ -653,6 +677,9 @@ fn edit_config(app: &Arc<App>, edit: impl FnOnce(&mut serde_yaml::Value)) -> Res
         Ok(c) => c,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     };
+    if let Err(message) = app.notifications.validate_destination_change(app, &cfg) {
+        return err(StatusCode::CONFLICT, message);
+    }
     if let Err(e) = std::fs::write(&app.cfg_path, out) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     }
@@ -665,17 +692,243 @@ async fn get_config(State(app): State<Arc<App>>) -> Json<Value> {
     Json(json!({ "text": text, "path": app.cfg_path.display().to_string() }))
 }
 
+/// Report sanitized delivery status and whether this request may enter managed credentials.
+async fn notification_status(
+    State(app): State<Arc<App>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
+    let mut status = app.notifications.status(&app);
+    let guard = credential_guard(&app, peer.ip(), req.headers(), req.uri(), false);
+    status["credential_ui_ready"] = json!(guard.is_ok());
+    status["credential_ui_reason"] = json!(guard.err().unwrap_or("ready"));
+    no_store(Json(status).into_response())
+}
+/// Mark a management response as non-cacheable, including rejected credential requests.
+fn no_store(mut response: Response) -> Response {
+    response.headers_mut().insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    response
+}
+/// Return a fixed credential failure without reflecting submitted values.
+fn credential_error(status: StatusCode, message: &'static str) -> Response {
+    no_store(err(status, message))
+}
+/// Reject duplicate or non-text headers before interpreting security-sensitive request metadata.
+fn single_header<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>, &'static str> {
+    let mut values = headers.get_all(name).iter();
+    let value = values
+        .next()
+        .map(|value| value.to_str().map(str::trim).map_err(|_| "invalid_credential_request_header"))
+        .transpose()?;
+    if values.next().is_some() {
+        return Err("invalid_credential_request_header");
+    }
+    Ok(value)
+}
+/// Parse a bounded authority without accepting userinfo, whitespace, or URL path components.
+fn credential_host(value: &str, scheme: &str) -> Result<url::Url, &'static str> {
+    if value.is_empty()
+        || value.len() > 300
+        || value.chars().any(|c| c.is_whitespace() || matches!(c, '/' | '\\' | '?' | '#' | '@' | ','))
+    {
+        return Err("invalid_credential_request_host");
+    }
+    let url = url::Url::parse(&format!("{scheme}://{value}/")).map_err(|_| "invalid_credential_request_host")?;
+    if url.host().is_none() {
+        return Err("invalid_credential_request_host");
+    }
+    Ok(url)
+}
+/// Require opt-in secret entry, management bearer authentication, and the configured origin policy.
+fn credential_guard(
+    app: &App,
+    peer: std::net::IpAddr,
+    headers: &HeaderMap,
+    uri: &axum::http::Uri,
+    mutation: bool,
+) -> Result<(), &'static str> {
+    let cfg = app.cfg();
+    if !cfg.notifications.credential_ui_enabled {
+        return Err("credential_ui_disabled");
+    }
+    if !cfg.management_key.is_empty() {
+        let bearer = single_header(headers, "authorization")?
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .ok_or("credential_authorization_header_required")?;
+        if !management_key_matches(bearer, &cfg.management_key) {
+            return Err("credential_authorization_header_required");
+        }
+    }
+    if single_header(headers, "sec-fetch-site")?.is_some_and(|site| !matches!(site, "same-origin" | "none")) {
+        return Err("credential_cross_site_request_rejected");
+    }
+    if let Some(public_origin) =
+        crate::notifications::credential_public_origin(&cfg.notifications.credential_public_url)?
+    {
+        // Public-origin mode is an administrator's deployment trust decision. Host
+        // and forwarded headers cannot independently attest browser TLS behind a proxy.
+        return credential_origin_check(headers, &public_origin, mutation);
+    }
+    let header_host = single_header(headers, "host")?;
+    let authority = uri.authority().map(|authority| authority.as_str());
+    let host = header_host.or(authority).ok_or("invalid_credential_request_host")?;
+    let trusted = app.notifications.trusted_credential_proxy(peer);
+    let tls = app.startup_config.tls.enable;
+    let forwarded = single_header(headers, "x-forwarded-proto")?;
+    let effective_host = if trusted { single_header(headers, "x-forwarded-host")?.unwrap_or(host) } else { host };
+    let normalized_peer = match peer {
+        std::net::IpAddr::V6(ip) => ip.to_ipv4_mapped().map(std::net::IpAddr::V4).unwrap_or(peer),
+        _ => peer,
+    };
+    let scheme = if tls || trusted && forwarded == Some("https") {
+        "https"
+    } else {
+        let host = credential_host(host, "http")?;
+        let local_host = match host.host() {
+            Some(url::Host::Domain(domain)) => domain == "localhost",
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            _ => false,
+        };
+        let forwarded_headers = ["forwarded", "x-forwarded-proto", "x-forwarded-host", "x-forwarded-for", "x-real-ip"]
+            .iter()
+            .any(|name| headers.contains_key(*name));
+        if !normalized_peer.is_loopback() || !local_host || forwarded_headers {
+            return Err("credential_https_required");
+        }
+        "http"
+    };
+    let expected = credential_host(effective_host, scheme)?;
+    if let (Some(host), Some(authority)) = (header_host, authority)
+        && credential_host(host, scheme)?.origin() != credential_host(authority, scheme)?.origin()
+    {
+        return Err("invalid_credential_request_host");
+    }
+    credential_origin_check(headers, &expected.origin().ascii_serialization(), mutation)
+}
+/// Require an exact mutation Origin and reject malformed, duplicate, or cross-origin metadata.
+fn credential_origin_check(headers: &HeaderMap, expected: &str, required: bool) -> Result<(), &'static str> {
+    let Some(origin) = single_header(headers, "origin")? else {
+        return if required { Err("credential_origin_required") } else { Ok(()) };
+    };
+    if origin.chars().any(|c| c.is_control() || c.is_whitespace() || matches!(c, '\\' | '@' | '?' | '#')) {
+        return Err("credential_origin_mismatch");
+    }
+    let (_, authority_and_path) = origin.split_once("://").ok_or("credential_origin_mismatch")?;
+    if authority_and_path.split_once('/').is_some_and(|(_, path)| !path.is_empty()) {
+        return Err("credential_origin_mismatch");
+    }
+    let origin = url::Url::parse(origin).map_err(|_| "credential_origin_mismatch")?;
+    if origin.path() != "/"
+        || origin.query().is_some()
+        || origin.fragment().is_some()
+        || !origin.username().is_empty()
+        || origin.password().is_some()
+        || origin.origin().ascii_serialization() != expected
+    {
+        return Err("credential_origin_mismatch");
+    }
+    Ok(())
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NotificationCredentialBody {
+    url: String,
+    #[serde(default)]
+    bearer_token: Option<String>,
+}
+/// Accept bounded same-origin JSON and replace a write-only credential bundle.
+async fn put_notification_credentials(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
+    if let Err(message) = credential_guard(&app, peer.ip(), req.headers(), req.uri(), true) {
+        return credential_error(StatusCode::FORBIDDEN, message);
+    }
+    if !single_header(req.headers(), "content-type").ok().flatten().is_some_and(|value| {
+        value.split(';').next().is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
+    }) {
+        return credential_error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "credential_json_required");
+    }
+    let bytes = match axum::body::to_bytes(req.into_body(), 20 << 10).await {
+        Ok(bytes) => bytes,
+        Err(_) => return credential_error(StatusCode::PAYLOAD_TOO_LARGE, "credential_body_too_large"),
+    };
+    let body: NotificationCredentialBody = match serde_json::from_slice(&bytes) {
+        Ok(body) => body,
+        Err(_) => return credential_error(StatusCode::BAD_REQUEST, "invalid_credential_body"),
+    };
+    match app.notifications.save_credentials(&app, &id, body.url, body.bearer_token) {
+        Ok(()) => no_store(Json(json!({"saved":true})).into_response()),
+        Err(message) => credential_error(
+            if message == "credential_ui_disabled" {
+                StatusCode::FORBIDDEN
+            } else if message == "credentials_externally_managed" {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            },
+            message,
+        ),
+    }
+}
+/// Authenticate an empty-body deletion without returning the removed credential.
+async fn delete_notification_credentials(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
+    if let Err(message) = credential_guard(&app, peer.ip(), req.headers(), req.uri(), true) {
+        return credential_error(StatusCode::FORBIDDEN, message);
+    }
+    if axum::body::to_bytes(req.into_body(), 0).await.is_err() {
+        return credential_error(StatusCode::BAD_REQUEST, "credential_delete_body_must_be_empty");
+    }
+    match app.notifications.remove_credentials(&app, &id) {
+        Ok(()) => no_store(Json(json!({"removed":true})).into_response()),
+        Err(message) => credential_error(
+            if message == "credential_ui_disabled" {
+                StatusCode::FORBIDDEN
+            } else if message == "credentials_externally_managed" {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            },
+            message,
+        ),
+    }
+}
+
+// JSON prevents ordinary cross-origin forms from triggering a localhost send.
+/// Require JSON admission before attempting a rate-limited destination test.
+async fn test_notification(State(app): State<Arc<App>>, Path(id): Path<String>, Json(body): Json<Value>) -> Response {
+    if !body.as_object().is_some_and(|value| value.is_empty()) {
+        return err(StatusCode::BAD_REQUEST, "Send an empty JSON object to test a configured destination");
+    }
+    match app.notifications.test(&app, &id).await {
+        Ok(value) => Json(value).into_response(),
+        Err(message) => err(StatusCode::BAD_REQUEST, message),
+    }
+}
+
 #[derive(Deserialize)]
 struct ConfigBody {
     text: String,
 }
 
+/// Validate raw YAML and credential lifecycle constraints before atomically applying it.
 async fn put_config(State(app): State<Arc<App>>, Json(b): Json<ConfigBody>) -> Response {
     let _guard = app.config_write.lock();
     let cfg = match Config::parse(&b.text) {
         Ok(c) => c,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("{e:#}")),
     };
+    if let Err(message) = app.notifications.validate_destination_change(&app, &cfg) {
+        return err(StatusCode::CONFLICT, message);
+    }
     if let Err(e) = std::fs::write(&app.cfg_path, &b.text) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     }
@@ -716,6 +969,7 @@ struct SettingsBody {
     changes: serde_json::Map<String, Value>,
 }
 
+/// Preserve YAML layout while applying validated structured edits and credential lifecycle guards.
 async fn patch_settings(State(app): State<Arc<App>>, Json(body): Json<SettingsBody>) -> Response {
     let _guard = app.config_write.lock();
     let text = match std::fs::read_to_string(&app.cfg_path) {
@@ -732,6 +986,9 @@ async fn patch_settings(State(app): State<Arc<App>>, Json(body): Json<SettingsBo
         Ok(result) => result,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("{e:#}")),
     };
+    if let Err(message) = app.notifications.validate_destination_change(&app, &cfg) {
+        return err(StatusCode::CONFLICT, message);
+    }
     let mut response = match settings_response(&app, &out) {
         Ok(body) => body,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("{e:#}")),
@@ -821,6 +1078,56 @@ async fn live(State(app): State<Arc<App>>, ws: WebSocketUpgrade) -> Response {
 mod tests {
     use super::*;
 
+    #[test]
+    /// Verify that public credential origin ignores proxy headers and requires mutation origin.
+    fn public_credential_origin_ignores_proxy_headers_and_requires_mutation_origin() {
+        let cfg = Config {
+            auth_dir: "/nonexistent/public-credential-origin-test".into(),
+            management_key: "synthetic-origin-key".into(),
+            notifications: crate::notifications::Config {
+                credential_ui_enabled: true,
+                credential_public_url: "https://dashboard.example.test:443/".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let app = App::new(cfg, std::path::PathBuf::from("/nonexistent/public-credential-config.yaml"));
+        let uri = "/api/notifications/ops/credentials".parse().unwrap();
+        let peer = "192.0.2.1".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer synthetic-origin-key".parse().unwrap());
+        headers.insert("host", "internal-proxy.invalid:8319".parse().unwrap());
+        headers.insert("x-forwarded-proto", "http, https".parse().unwrap());
+        headers.append("x-forwarded-proto", "invalid".parse().unwrap());
+        headers.insert("x-forwarded-host", "untrusted.invalid".parse().unwrap());
+        assert!(credential_guard(&app, peer, &headers, &uri, false).is_ok());
+        assert_eq!(credential_guard(&app, peer, &headers, &uri, true), Err("credential_origin_required"));
+        headers.insert("origin", "https://dashboard.example.test".parse().unwrap());
+        assert!(credential_guard(&app, peer, &headers, &uri, true).is_ok());
+        for origin in [
+            "http://dashboard.example.test",
+            "https://other.example.test",
+            "https://dashboard.example.test/a/..",
+            "https://dashboard.example.test?",
+        ] {
+            headers.insert("origin", origin.parse().unwrap());
+            assert_eq!(credential_guard(&app, peer, &headers, &uri, true), Err("credential_origin_mismatch"));
+            assert_eq!(credential_guard(&app, peer, &headers, &uri, false), Err("credential_origin_mismatch"));
+        }
+        headers.insert("origin", "https://dashboard.example.test".parse().unwrap());
+        headers.insert("sec-fetch-site", "same-site".parse().unwrap());
+        assert_eq!(credential_guard(&app, peer, &headers, &uri, true), Err("credential_cross_site_request_rejected"));
+        headers.remove("sec-fetch-site");
+        let mut cfg = (*app.cfg()).clone();
+        cfg.notifications.credential_public_url = "https://new.example.test".into();
+        app.set_config(cfg);
+        assert_eq!(credential_guard(&app, peer, &headers, &uri, true), Err("credential_origin_mismatch"));
+        headers.insert("origin", "https://new.example.test".parse().unwrap());
+        assert!(credential_guard(&app, peer, &headers, &uri, true).is_ok());
+        headers.remove("authorization");
+        assert_eq!(credential_guard(&app, peer, &headers, &uri, true), Err("credential_authorization_header_required"));
+    }
+
     #[tokio::test]
     async fn key_edits_fall_back_to_a_rewrite_when_formatting_cannot_be_kept() {
         let dir = std::env::temp_dir().join(format!("cliproxyapi-edit-{}", uuid::Uuid::new_v4()));
@@ -906,6 +1213,31 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[test]
+    /// Verify that credential guard accepts http2 authority and rejects conflicting host.
+    fn credential_guard_accepts_http2_authority_and_rejects_conflicting_host() {
+        let cfg = Config {
+            auth_dir: "/nonexistent/credential-h2-test".into(),
+            management_key: "synthetic-h2-key".into(),
+            tls: crate::config::Tls { enable: true, ..Default::default() },
+            notifications: crate::notifications::Config { credential_ui_enabled: true, ..Default::default() },
+            ..Default::default()
+        };
+        let app = App::new(cfg, std::path::PathBuf::from("/nonexistent/credential-h2-config.yaml"));
+        let uri: axum::http::Uri = "https://dashboard.example.test/api/notifications/ops/credentials".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer synthetic-h2-key".parse().unwrap());
+        headers.insert("origin", "https://dashboard.example.test".parse().unwrap());
+        let peer = "192.0.2.1".parse().unwrap();
+        assert!(credential_guard(&app, peer, &headers, &uri, true).is_ok());
+        headers.insert("host", "dashboard.example.test:443".parse().unwrap());
+        assert!(credential_guard(&app, peer, &headers, &uri, true).is_ok());
+        headers.insert("host", "conflicting.example.test".parse().unwrap());
+        assert_eq!(credential_guard(&app, peer, &headers, &uri, true), Err("invalid_credential_request_host"));
+        headers.remove("host");
+        let relative = "/api/notifications/ops/credentials".parse().unwrap();
+        assert_eq!(credential_guard(&app, peer, &headers, &relative, true), Err("invalid_credential_request_host"));
+    }
     #[test]
     fn bcrypt_management_keys() {
         let hash = bcrypt::hash("open sesame", 4).unwrap();
