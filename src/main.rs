@@ -11,6 +11,11 @@ mod formats;
 mod ir;
 mod media;
 mod mgmt;
+#[cfg(all(test, unix))]
+mod notification_credential_tests;
+#[cfg(test)]
+mod notification_integration_tests;
+mod notifications;
 mod oauth;
 mod proxy;
 mod quota;
@@ -94,6 +99,7 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Initialize the shared proxy and optional notification worker alongside existing background tasks.
 async fn serve(app: Arc<App>) -> Result<()> {
     let cfg = app.cfg();
     if !cfg.is_loopback() && cfg.api_keys.is_empty() {
@@ -123,6 +129,7 @@ async fn serve(app: Arc<App>) -> Result<()> {
     tokio::spawn(oauth::refresher(app.clone()));
     tokio::spawn(antigravity::version_updater(app.clone()));
     tokio::spawn(quota::poller(app.clone()));
+    tokio::spawn(notifications::worker(app.clone()));
     tokio::spawn(watch(app.clone()));
 
     let scheme = if cfg.tls.enable { "https" } else { "http" };
@@ -205,10 +212,13 @@ async fn watch(app: Arc<App>) {
             cfg_time = t;
             let _guard = app.config_write.lock();
             match std::fs::read_to_string(&app.cfg_path).map_err(anyhow::Error::from).and_then(|s| Config::parse(&s)) {
-                Ok(cfg) => {
-                    tracing::info!("config reloaded");
-                    app.set_config(cfg);
-                }
+                Ok(cfg) => match app.notifications.validate_destination_change(&app, &cfg) {
+                    Ok(()) => {
+                        tracing::info!("config reloaded");
+                        app.set_config(cfg);
+                    }
+                    Err(message) => tracing::error!("config not reloaded: {message}"),
+                },
                 Err(e) => tracing::error!("config not reloaded: {e:#}"),
             }
         }

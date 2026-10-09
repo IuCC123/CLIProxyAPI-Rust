@@ -31,6 +31,7 @@ A lean rewrite of CLIProxyAPI (Go): one binary, no runtime, an embedded dashboar
 - Dashboard is vanilla HTML/CSS/JS embedded in the binary; no build step, no external requests (no CDNs, no web fonts).
 - Management API is localhost-only unless `management-key` is set.
 - Usage statistics are in-memory (reset on restart).
+- Optional Claude/Codex quota notifications use the existing usage observations and provider polls. Recovery requires fresh provider confirmation, not an elapsed reset timer. A bounded delivery journal persists in the auth directory; webhook credentials stay separate from YAML and are write-only in the dashboard. Managed credential writes require Unix file permissions; Windows supports externally provisioned credentials.
 
 ## Brand Commitments
 

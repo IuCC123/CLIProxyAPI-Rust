@@ -26,6 +26,7 @@ const S = {
   confirm: null,
   resets: {}, // account-specific confirmations and errors
   resetModal: null,
+  notifications: { status: null, loading: false, error: null, busy: null, testMsg: null, filter: '', credentialEditor: null, credentialRemove: null, credentialMsg: null },
   config: { values: null, saved: null, defaults: {}, revision: '', path: '', ignored: [], restart_fields: [],
     msg: null, busy: false, loading: false, section: 'server', provider: 'claude', oauthProvider: 'claude',
     errors: {}, opens: {}, secrets: {}, reloadConfirm: false, reveal: false, raw: { text: null, saved: null, loading: false } },
@@ -217,6 +218,7 @@ function setLive(state) {
 function onLive(msg) {
   if (msg.type === 'request') return onRequest(msg.data);
   if (msg.type === 'accounts') return refreshAccounts();
+  if (msg.type === 'notifications' && S.route === 'config' && S.config.section === 'notifications') return loadNotifications();
   if (msg.type === 'login') return pollLogin();
   if (msg.type === 'tick' && S.overview) {
     S.overview.totals = msg.data.totals;
@@ -1400,6 +1402,11 @@ setInterval(() => {
   }
   if (expired) refreshAccounts();
 }, 1000);
+
+// Refresh notification activity only while its settings section is visible.
+setInterval(() => {
+  if (!document.hidden && !S.locked && S.route === 'config' && S.config.section === 'notifications') loadNotifications();
+}, 5000);
 
 // Resync the hour of traffic once a minute (rolls the window forward).
 setInterval(async () => {

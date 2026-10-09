@@ -105,7 +105,13 @@ impl Quota {
         Some(100.0 - used.clamp(0.0, 100.0))
     }
 
+    #[cfg(test)]
+    /// Use the normal routing-only refresh schedule for baseline tests.
     fn needs_refresh(&self, now: DateTime<Utc>) -> bool {
+        self.needs_refresh_for(now, false)
+    }
+    /// Retain failure backoff while polling authoritatively for notifications even on busy subscriptions.
+    fn needs_refresh_for(&self, now: DateTime<Utc>, notifications: bool) -> bool {
         // A check that brought no data waits 2, 4, 8 ... up to 30 minutes before the next.
         if self.check_failures > 0
             && let Some(at) = self.checked_at
@@ -114,7 +120,8 @@ impl Quota {
             return false;
         }
         let Some(refreshed) = self.refreshed_at else { return true };
-        let busy = self.updated_at.is_some_and(|u| u > refreshed && (now - u).num_seconds() < POLL_EVERY);
+        let busy =
+            !notifications && self.updated_at.is_some_and(|u| u > refreshed && (now - u).num_seconds() < POLL_EVERY);
         (now - refreshed).num_seconds() >= if busy { BUSY_POLL_EVERY } else { POLL_EVERY }
     }
 
@@ -164,14 +171,19 @@ fn ts(secs: i64) -> Option<DateTime<Utc>> {
 /// Reads the quota headers a Claude or ChatGPT response carries.
 pub fn observe(acct: &Account, headers: &reqwest::header::HeaderMap, epoch: u64) {
     let h = |n: &str| headers.get(n).and_then(|v| v.to_str().ok()).map(str::trim).filter(|s| !s.is_empty());
-    let num = |n: &str| h(n).and_then(|v| v.parse::<f64>().ok());
+    let num = |n: &str| h(n).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite());
     let mut windows = Vec::new();
     let mut plan = None;
     match acct.provider {
         Provider::Claude => {
             for (key, name) in [("5h", "5h"), ("7d", "week")] {
-                let Some(u) = num(&format!("anthropic-ratelimit-unified-{key}-utilization")) else { continue };
                 let rejected = h(&format!("anthropic-ratelimit-unified-{key}-status")) == Some("rejected");
+                let Some(u) = num(&format!("anthropic-ratelimit-unified-{key}-utilization"))
+                    .filter(|v| (0.0..=1.0).contains(v))
+                    .or_else(|| rejected.then_some(1.0))
+                else {
+                    continue;
+                };
                 let reset = num(&format!("anthropic-ratelimit-unified-{key}-reset")).and_then(|t| ts(t as i64));
                 let used = if rejected { 100.0 } else { (u * 100.0).clamp(0.0, 100.0) };
                 windows.push(Window { name: name.into(), used, resets_at: reset, model: None });
@@ -179,13 +191,18 @@ pub fn observe(acct: &Account, headers: &reqwest::header::HeaderMap, epoch: u64)
         }
         Provider::Codex => {
             for which in ["primary", "secondary"] {
-                let minutes = num(&format!("x-codex-{which}-window-minutes")).unwrap_or(0.0) as i64;
-                let Some(used) = num(&format!("x-codex-{which}-used-percent")).filter(|_| minutes > 0) else {
+                let minutes = num(&format!("x-codex-{which}-window-minutes"))
+                    .filter(|v| (1.0..=525600.0).contains(v))
+                    .unwrap_or(0.0) as i64;
+                let Some(used) =
+                    num(&format!("x-codex-{which}-used-percent")).filter(|v| minutes > 0 && (0.0..=100.0).contains(v))
+                else {
                     continue;
                 };
                 let reset = num(&format!("x-codex-{which}-reset-at")).and_then(|t| ts(t as i64)).or_else(|| {
                     num(&format!("x-codex-{which}-reset-after-seconds"))
-                        .map(|s| Utc::now() + chrono::Duration::seconds(s as i64))
+                        .filter(|s| (0.0..=31536000.0).contains(s))
+                        .and_then(|s| Utc::now().checked_add_signed(chrono::Duration::seconds(s as i64)))
                 });
                 windows.push(Window {
                     name: label(minutes * 60),
@@ -200,6 +217,9 @@ pub fn observe(acct: &Account, headers: &reqwest::header::HeaderMap, epoch: u64)
     }
     let mut st = acct.state.lock();
     if st.quota_epoch == epoch && !st.quota_refreshing {
+        if st.notifications_enabled {
+            st.notification_evidence.observe(&windows, false);
+        }
         st.quota.set(windows, plan);
     }
 }
@@ -210,24 +230,35 @@ pub fn observe_codex_event(acct: &Account, v: &Value, epoch: u64) {
         return;
     }
     let rl = if v["rate_limits"].is_object() { &v["rate_limits"] } else { v };
-    let windows = ["primary", "secondary"]
+    let windows: Vec<Window> = ["primary", "secondary"]
         .iter()
         .filter_map(|which| {
             let w = &rl[*which];
-            let minutes = w["window_minutes"].as_i64().filter(|m| *m > 0)?;
-            let reset = w["reset_at"]
-                .as_i64()
-                .and_then(ts)
-                .or_else(|| w["reset_after_seconds"].as_i64().map(|s| Utc::now() + chrono::Duration::seconds(s)));
-            Some(Window { name: label(minutes * 60), used: w["used_percent"].as_f64()?, resets_at: reset, model: None })
+            let minutes = w["window_minutes"].as_i64().filter(|m| (1..=525600).contains(m))?;
+            let reset = w["reset_at"].as_i64().and_then(ts).or_else(|| {
+                w["reset_after_seconds"]
+                    .as_i64()
+                    .filter(|s| (0..=31536000).contains(s))
+                    .and_then(|s| Utc::now().checked_add_signed(chrono::Duration::seconds(s)))
+            });
+            Some(Window {
+                name: label(minutes * 60),
+                used: w["used_percent"].as_f64().filter(|v| v.is_finite() && (0.0..=100.0).contains(v))?,
+                resets_at: reset,
+                model: None,
+            })
         })
         .collect();
     let mut st = acct.state.lock();
     if st.quota_epoch == epoch && !st.quota_refreshing {
+        if st.notifications_enabled {
+            st.notification_evidence.observe(&windows, false);
+        }
         st.quota.set(windows, v["plan_type"].as_str().map(String::from));
     }
 }
 
+/// Parse finite Claude shared and model-scoped usage without inventing missing windows.
 fn claude_windows(v: &Value) -> Vec<Window> {
     let rfc = |s: &Value| s.as_str().and_then(|s| DateTime::parse_from_rfc3339(s).ok()).map(|t| t.with_timezone(&Utc));
     [
@@ -242,7 +273,7 @@ fn claude_windows(v: &Value) -> Vec<Window> {
         let w = &v[*key];
         Some(Window {
             name: (*name).into(),
-            used: w["utilization"].as_f64()?.clamp(0.0, 100.0),
+            used: w["utilization"].as_f64().filter(|v| v.is_finite() && (0.0..=100.0).contains(v))?,
             resets_at: rfc(&w["resets_at"]),
             model: model.map(String::from),
         })
@@ -250,6 +281,7 @@ fn claude_windows(v: &Value) -> Vec<Window> {
     .collect()
 }
 
+/// Parse bounded Codex usage windows and authoritative reached-limit indicators.
 fn codex_windows(v: &Value) -> Vec<Window> {
     let rl = &v["rate_limit"];
     let reached = rl["limit_reached"] == true;
@@ -257,8 +289,8 @@ fn codex_windows(v: &Value) -> Vec<Window> {
         .iter()
         .filter_map(|key| {
             let w = &rl[*key];
-            let secs = w["limit_window_seconds"].as_i64().filter(|s| *s > 0)?;
-            let used = w["used_percent"].as_f64()?;
+            let secs = w["limit_window_seconds"].as_i64().filter(|s| (1..=31536000).contains(s))?;
+            let used = w["used_percent"].as_f64().filter(|v| v.is_finite() && (0.0..=100.0).contains(v))?;
             let reset = w["reset_at"].as_i64().and_then(ts);
             let used = if reached && used >= 99.0 { 100.0 } else { used.clamp(0.0, 100.0) };
             Some(Window { name: label(secs), used, resets_at: reset, model: None })
@@ -269,6 +301,7 @@ fn codex_windows(v: &Value) -> Vec<Window> {
 /// Asks the provider's usage endpoint (free, no tokens) for current quota.
 pub async fn poll(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
     let epoch = acct.quota_epoch();
+    let started = Utc::now();
     let (token, account_id) = match &*acct.cred.read() {
         Credential::OAuth(o) if o.base_url.is_none() => (o.access_token.clone(), o.account_id.clone()),
         _ => return Ok(()),
@@ -307,15 +340,27 @@ pub async fn poll(app: &App, acct: &Arc<Account>) -> anyhow::Result<()> {
     let mut st = acct.state.lock();
     if st.quota_epoch == epoch && !st.quota_refreshing {
         st.quota_epoch += 1;
-        authoritative(&mut st, windows, plan);
+        authoritative_at(&mut st, windows, plan, started);
     }
     Ok(())
 }
 
 /// Provider usage is authoritative, but absent windows cannot prove a cooldown has ended.
 pub fn authoritative(st: &mut crate::accounts::AccountState, windows: Vec<Window>, plan: Option<String>) {
+    authoritative_at(st, windows, plan, Utc::now());
+}
+/// Merge provider usage using the poll start time and preserve windows the provider did not report.
+fn authoritative_at(
+    st: &mut crate::accounts::AccountState,
+    windows: Vec<Window>,
+    plan: Option<String>,
+    observed_at: DateTime<Utc>,
+) {
     if windows.is_empty() {
         return;
+    }
+    if st.notifications_enabled {
+        st.notification_evidence.observe_at(&windows, true, observed_at);
     }
     let covered: Vec<String> = st
         .quota_cooldowns
@@ -378,9 +423,14 @@ pub async fn poller(app: Arc<App>) {
                 let _ = crate::banked_resets::refresh(&app, &acct).await;
                 changed = true;
             }
+            let now = Utc::now();
+            let reset_due = app.cfg().notifications.enabled && app.notifications.reset_due(&acct, now);
             let stale = {
                 let st = acct.state.lock();
-                !st.disabled && st.quota.needs_refresh(Utc::now())
+                let deadline_check = reset_due
+                    && st.quota.check_failures == 0
+                    && st.quota.checked_at.is_none_or(|checked| (now - checked).num_seconds() >= 60);
+                !st.disabled && (st.quota.needs_refresh_for(now, app.cfg().notifications.enabled) || deadline_check)
             };
             if !stale || crate::oauth::ensure_fresh(&app, &acct, chrono::Duration::minutes(5), false).await.is_err() {
                 continue;
