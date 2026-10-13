@@ -729,7 +729,6 @@ mod tests {
     }
 
     #[test]
-    /// Verify that all strategies pin and keep the replacement after recovery.
     fn all_strategies_pin_and_keep_the_replacement_after_recovery() {
         for routing in [Routing::LeastUsed, Routing::SmartQuota, Routing::RoundRobin, Routing::FillFirst] {
             let cfg = config(routing);
@@ -753,7 +752,6 @@ mod tests {
     }
 
     #[test]
-    /// Verify that routing metadata distinguishes assignment reuse and quota migration.
     fn routing_metadata_distinguishes_assignment_reuse_and_quota_migration() {
         for routing in [Routing::LeastUsed, Routing::SmartQuota, Routing::RoundRobin, Routing::FillFirst] {
             let cfg = config(routing);

@@ -46,7 +46,6 @@ fn attachment_names(payload: &Value) -> Vec<&str> {
 }
 
 #[test]
-/// Verify that discord provider quota events attach one logo without changing message content.
 fn discord_provider_quota_events_attach_one_logo_without_changing_message_content() {
     let destination = discord();
     let logos = presentation();
@@ -71,7 +70,6 @@ fn discord_provider_quota_events_attach_one_logo_without_changing_message_conten
 }
 
 #[test]
-/// Verify that test notifications preview both logos unknown providers do not get a logo and other formats are unchanged.
 fn test_notifications_preview_both_logos_unknown_providers_do_not_get_a_logo_and_other_formats_are_unchanged() {
     let logos = presentation();
     let plain = Presentation::new(Some("Synthetic subscription"), chrono_tz::UTC).with_provider_logos(false);
@@ -102,7 +100,6 @@ fn test_notifications_preview_both_logos_unknown_providers_do_not_get_a_logo_and
 }
 
 #[test]
-/// Verify that provider logos are preview attachments only when enabled.
 fn provider_logos_are_preview_attachments_only_when_enabled() {
     let destination = Destination { format: Format::Generic, ..discord() };
     let event = sample_event("claude", "quota.exhausted");
@@ -128,7 +125,6 @@ fn provider_logos_are_preview_attachments_only_when_enabled() {
 }
 
 #[test]
-/// Verify that provider logos config defaults on and accepts explicit opt out.
 fn provider_logos_config_defaults_on_and_accepts_explicit_opt_out() {
     assert!(crate::notifications::Config::default().provider_logos);
     assert!(crate::config::Config::parse("").unwrap().notifications.provider_logos);
@@ -189,7 +185,6 @@ impl Drop for TestServer {
 }
 
 #[tokio::test]
-/// Verify that discord multipart matches payload metadata and bundled png bytes.
 async fn discord_multipart_matches_payload_metadata_and_bundled_png_bytes() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address: SocketAddr = listener.local_addr().unwrap();

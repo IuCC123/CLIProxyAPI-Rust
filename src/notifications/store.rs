@@ -318,7 +318,6 @@ mod tests {
         }
     }
     #[test]
-    /// Verify that durable state deduplicates restart and exclusive owner blocks a second monitor.
     fn durable_state_deduplicates_restart_and_exclusive_owner_blocks_a_second_monitor() {
         let temp = Temp::new();
         let mut store = Store::open(&temp.0).unwrap();
@@ -350,7 +349,6 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
-    /// Verify that credentials require private regular bounded files and reject symlinks.
     fn credentials_require_private_regular_bounded_files_and_reject_symlinks() {
         use std::os::unix::fs::{PermissionsExt, symlink};
         let temp = Temp::new();

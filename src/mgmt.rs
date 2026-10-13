@@ -1079,7 +1079,6 @@ mod tests {
     use super::*;
 
     #[test]
-    /// Verify that public credential origin ignores proxy headers and requires mutation origin.
     fn public_credential_origin_ignores_proxy_headers_and_requires_mutation_origin() {
         let cfg = Config {
             auth_dir: "/nonexistent/public-credential-origin-test".into(),
@@ -1214,7 +1213,6 @@ mod tests {
     }
 
     #[test]
-    /// Verify that credential guard accepts http2 authority and rejects conflicting host.
     fn credential_guard_accepts_http2_authority_and_rejects_conflicting_host() {
         let cfg = Config {
             auth_dir: "/nonexistent/credential-h2-test".into(),

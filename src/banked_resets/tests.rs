@@ -405,7 +405,6 @@ async fn applied_reset_survives_refresh_failure_and_preserves_other_cooldowns() 
     );
 }
 #[test]
-/// Verify that a reset clears exhaustion the proxy detected.
 fn a_reset_clears_exhaustion_the_proxy_detected() {
     let (_temp, app, acct) = fixture(Provider::Claude, 1);
     let body =
@@ -431,7 +430,6 @@ fn a_reset_clears_exhaustion_the_proxy_detected() {
 }
 
 #[test]
-/// Verify that delayed quota error after reset cannot restore cooldown or notification evidence.
 fn delayed_quota_error_after_reset_cannot_restore_cooldown_or_notification_evidence() {
     let (_temp, app, acct) = fixture(Provider::Claude, 1);
     acct.state.lock().notifications_enabled = true;
@@ -463,7 +461,6 @@ fn delayed_quota_error_after_reset_cannot_restore_cooldown_or_notification_evide
 }
 
 #[test]
-/// Verify that disabling and reenabling account invalidates inflight quota errors.
 fn disabling_and_reenabling_account_invalidates_inflight_quota_errors() {
     let (_temp, app, acct) = fixture(Provider::Claude, 1);
     let epoch = acct.quota_epoch();

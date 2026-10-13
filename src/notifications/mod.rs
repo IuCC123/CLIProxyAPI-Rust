@@ -965,7 +965,6 @@ pub async fn worker(app: Arc<App>) {
 mod tests {
     use super::*;
     #[test]
-    /// Verify that credential public url is a strict normalized https origin.
     fn credential_public_url_is_a_strict_normalized_https_origin() {
         assert_eq!(credential_public_origin(""), Ok(None));
         assert_eq!(
@@ -1050,7 +1049,6 @@ mod tests {
         .unwrap();
     }
     #[test]
-    /// Verify that destination validation prevents credential namespace escape.
     fn destination_validation_prevents_credential_namespace_escape() {
         for id in ["", "../secret", "A", "foo_bar", "-foo", "foo-", "é"] {
             assert!(!valid_id(id));
@@ -1070,7 +1068,6 @@ mod tests {
         assert!(bad.validate().is_err());
     }
     #[test]
-    /// Verify that old config and legacy journal remain loadable without persisting presentation.
     fn old_config_and_legacy_journal_remain_loadable_without_persisting_presentation() {
         let old: Config = serde_json::from_value(json!({"enabled":true,"destinations":[]})).unwrap();
         assert_eq!(old.time_zone, "UTC");
@@ -1094,7 +1091,6 @@ mod tests {
         assert!(!persisted.contains("display_name"));
     }
     #[test]
-    /// Verify that network and secret policy remain startup only after management config reload.
     fn network_and_secret_policy_remain_startup_only_after_management_config_reload() {
         let (_temp, app, _) = fixture(false);
         let mut cfg = (*app.cfg()).clone();
@@ -1108,7 +1104,6 @@ mod tests {
         assert!(app.notifications.secrets.ends_with(".notification-secrets"));
     }
     #[tokio::test]
-    /// Verify that accepted first tick headers are sent and evidence overflow recovers.
     async fn accepted_first_tick_headers_are_sent_and_evidence_overflow_recovers() {
         let (_temp, app, acct) = fixture(true);
         let headers = reqwest::header::HeaderMap::from_iter([(
@@ -1146,7 +1141,6 @@ mod tests {
         let _ = task.await;
     }
     #[tokio::test]
-    /// Verify that feature off does not capture observations or create notification state.
     async fn feature_off_does_not_capture_observations_or_create_notification_state() {
         let (temp, app, acct) = fixture(false);
         let headers = reqwest::header::HeaderMap::from_iter([(
@@ -1322,7 +1316,6 @@ mod tests {
         let _ = task.await;
     }
     #[tokio::test]
-    /// Verify that persisted available after restart waits for all fresh authoritative windows.
     async fn persisted_available_after_restart_waits_for_all_fresh_authoritative_windows() {
         let (temp, app, acct) = fixture(true);
         seed_pending(&app, &acct, "quota.available");
@@ -1350,7 +1343,6 @@ mod tests {
         let _ = task.await;
     }
     #[tokio::test]
-    /// Verify that reenabled pending recovery discards pre pause confirmation.
     async fn reenabled_pending_recovery_discards_pre_pause_confirmation() {
         let (_temp, app, acct) = fixture(true);
         seed_pending(&app, &acct, "quota.available");
@@ -1376,7 +1368,6 @@ mod tests {
         let _ = task.await;
     }
     #[tokio::test]
-    /// Verify that brief account or global pause requires new confirmation even between worker ticks.
     async fn brief_account_or_global_pause_requires_new_confirmation_even_between_worker_ticks() {
         for account_pause in [false, true] {
             let (_temp, app, acct) = fixture(true);
@@ -1421,7 +1412,6 @@ mod tests {
         }
     }
     #[tokio::test]
-    /// Verify that persisted partial recovery waits but current partial recovery dispatches.
     async fn persisted_partial_recovery_waits_but_current_partial_recovery_dispatches() {
         let (_temp, app, acct) = fixture(true);
         seed_pending(&app, &acct, "quota.window_recovered");
@@ -1464,7 +1454,6 @@ mod tests {
         let _ = task.await;
     }
     #[tokio::test]
-    /// Verify that persisted exhaustion requires fresh matching blocking window.
     async fn persisted_exhaustion_requires_fresh_matching_blocking_window() {
         let (_temp, app, acct) = fixture(true);
         seed_pending(&app, &acct, "quota.exhausted");
@@ -1479,7 +1468,6 @@ mod tests {
         let _ = task.await;
     }
     #[test]
-    /// Verify that unknown recovery confirmation covers shared and learned model windows.
     fn unknown_recovery_confirmation_covers_shared_and_learned_model_windows() {
         let mut subscription = Subscription { provider: "claude".into(), ..Default::default() };
         let mut observation = state::Observation {
@@ -1508,7 +1496,6 @@ mod tests {
         assert!(fresh.permits(&event, &subscription, true));
     }
     #[tokio::test]
-    /// Verify that resumed partial recovery with changed blockers is cancelled.
     async fn resumed_partial_recovery_with_changed_blockers_is_cancelled() {
         let (_temp, app, acct) = fixture(true);
         seed_pending(&app, &acct, "quota.window_recovered");

@@ -124,7 +124,6 @@ async fn dashboard_account_toggle_discards_stale_quota_and_notification_evidence
 }
 
 #[tokio::test]
-/// Verify that notification test blocks loopback and persists only sanitized details.
 async fn notification_test_blocks_loopback_and_persists_only_sanitized_details() {
     let temp = Temp::new();
     let secrets = temp.0.join("secrets");
@@ -167,7 +166,6 @@ async fn notification_test_blocks_loopback_and_persists_only_sanitized_details()
 }
 
 #[tokio::test]
-/// Verify that notification management requires key and test rejects form content type.
 async fn notification_management_requires_key_and_test_rejects_form_content_type() {
     let temp = Temp::new();
     let app = app(&temp, false, None);
@@ -234,7 +232,6 @@ async fn managed_credentials_fail_closed_on_non_unix_without_disabling_external_
 }
 
 #[test]
-/// Verify that notification config rejects inline url credentials.
 fn notification_config_rejects_inline_url_credentials() {
     let error = crate::config::Config::parse(
         "notifications:\n  enabled: true\n  destinations:\n    - id: ops\n      format: discord\n      url: https://example.invalid/secret-sentinel\n",
@@ -244,7 +241,6 @@ fn notification_config_rejects_inline_url_credentials() {
 }
 
 #[tokio::test]
-/// Verify that hot config cannot expand startup notification secret access.
 async fn hot_config_cannot_expand_startup_notification_secret_access() {
     let temp = Temp::new();
     let startup_secrets = temp.0.join("startup-secrets");
@@ -274,7 +270,6 @@ async fn hot_config_cannot_expand_startup_notification_secret_access() {
 }
 
 #[tokio::test]
-/// Verify that status does not create notification state when feature is disabled.
 async fn status_does_not_create_notification_state_when_feature_is_disabled() {
     let temp = Temp::new();
     let app = app(&temp, false, None);
@@ -292,7 +287,6 @@ async fn status_does_not_create_notification_state_when_feature_is_disabled() {
 }
 
 #[tokio::test]
-/// Verify that management settings round trip timezone and reject invalid zone.
 async fn management_settings_round_trip_timezone_and_reject_invalid_zone() {
     let temp = Temp::new();
     let app = app(&temp, false, None);

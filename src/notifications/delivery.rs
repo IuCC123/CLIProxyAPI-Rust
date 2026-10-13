@@ -599,7 +599,6 @@ mod tests {
         Destination { id: "test".into(), format, enabled: true, chat_id: Some("1234".into()) }
     }
     #[test]
-    /// Verify that human times follow dst and generic keeps original machine identity and utc times.
     fn human_times_follow_dst_and_generic_keeps_original_machine_identity_and_utc_times() {
         let event = event();
         let presentation = Presentation::new(Some("My subscription"), chrono_tz::America::Denver);
@@ -620,7 +619,6 @@ mod tests {
         assert_eq!(generic["resets_at"], json!(event.resets_at));
     }
     #[test]
-    /// Verify that chat messages distinguish exhaustion partial recovery and full availability.
     fn chat_messages_distinguish_exhaustion_partial_recovery_and_full_availability() {
         let mut event = event();
         event.provider = "codex".into();
@@ -661,7 +659,6 @@ mod tests {
         assert!(text(&event, &presentation, Format::Discord).ends_with("Estimated reset: not provided"));
     }
     #[test]
-    /// Verify that chat platforms preserve readable messages and safe payload contracts.
     fn chat_platforms_preserve_readable_messages_and_safe_payload_contracts() {
         let event = event();
         let presentation = Presentation::new(Some("Work account"), chrono_tz::UTC);
@@ -700,7 +697,6 @@ mod tests {
         }
     }
     #[test]
-    /// Verify that display names are bounded single line and cannot add mentions links or markdown.
     fn display_names_are_bounded_single_line_and_cannot_add_mentions_links_or_markdown() {
         let malicious = "\u{202e}@everyone [click](https://evil.example) <@U123>\r\n";
         let safe = safe_name(malicious);
@@ -736,7 +732,6 @@ mod tests {
         }
     }
     #[test]
-    /// Verify that test messages have no fake subscription or provider even for legacy events.
     fn test_messages_have_no_fake_subscription_or_provider_even_for_legacy_events() {
         let mut event = event();
         event.event = "notification.test".into();
@@ -753,7 +748,6 @@ mod tests {
         assert!(generic.get("subscription_display_name").is_none());
     }
     #[tokio::test]
-    /// Verify that isolated transport refuses redirects bounds responses and checks acknowledgements.
     async fn isolated_transport_refuses_redirects_bounds_responses_and_checks_acknowledgements() {
         use axum::{
             Router,
@@ -878,7 +872,6 @@ mod tests {
         let _ = server.await;
     }
     #[test]
-    /// Verify that special addresses and mapped ipv6 cannot bypass filter.
     fn special_addresses_and_mapped_ipv6_cannot_bypass_filter() {
         for ip in [
             "127.0.0.1",
@@ -902,7 +895,6 @@ mod tests {
         }
     }
     #[test]
-    /// Verify that private allowlist is exact host port and subnet.
     fn private_allowlist_is_exact_host_port_and_subnet() {
         let allow = vec![PrivateEndpoint { host: "chat.example".into(), port: 443, cidrs: vec!["10.1.0.0/16".into()] }];
         assert!(allowed("10.1.2.3".parse().unwrap(), "chat.example", 443, &allow));

@@ -210,7 +210,6 @@ mod tests {
         Window { name: name.into(), used, resets_at: None, model: None }
     }
     #[test]
-    /// Verify that exhaustion is deduplicated and partial recovery preserves week.
     fn exhaustion_is_deduplicated_and_partial_recovery_preserves_week() {
         let mut sub = Subscription::default();
         let used = obs(vec![window("5h", 100.0), window("week", 100.0)]);
@@ -224,7 +223,6 @@ mod tests {
         assert_eq!(recovered[0].event, "quota.available");
     }
     #[test]
-    /// Verify that expired missing and stale samples cannot recover.
     fn expired_missing_and_stale_samples_cannot_recover() {
         let mut sub = Subscription::default();
         let used = obs(vec![window("5h", 100.0)]);
@@ -239,7 +237,6 @@ mod tests {
         assert!(sub.windows.values().all(|w| w.exhausted));
     }
     #[test]
-    /// Verify that unknown requires full authoritative evidence and model scope.
     fn unknown_requires_full_authoritative_evidence_and_model_scope() {
         let mut sub = Subscription::default();
         let mut unknown = obs(vec![]);
@@ -250,7 +247,6 @@ mod tests {
         assert_eq!(recovered.len(), 1);
     }
     #[test]
-    /// Verify that headers cannot recover and provider reads started before exhaustion are stale.
     fn headers_cannot_recover_and_provider_reads_started_before_exhaustion_are_stale() {
         let mut sub = Subscription::default();
         let used = obs(vec![window("5h", 100.0)]);
@@ -267,7 +263,6 @@ mod tests {
         assert_eq!(recovered[0].event, "quota.available");
     }
     #[test]
-    /// Verify that model scoped week stays a blocker after shared window recovers.
     fn model_scoped_week_stays_a_blocker_after_shared_window_recovers() {
         let mut sub = Subscription::default();
         let opus = Window { name: "week opus".into(), model: Some("opus".into()), ..window("week", 100.0) };
