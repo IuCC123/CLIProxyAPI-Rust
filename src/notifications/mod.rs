@@ -231,13 +231,17 @@ pub struct Service {
 impl Service {
     /// Capture startup-only secret paths and network permissions without creating monitoring state.
     pub fn new(cfg: &AppConfig) -> Self {
-        let root = cfg.auth_dir();
-        let secrets = cfg
-            .notifications
-            .secrets_dir
-            .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| root.join(".notification-secrets"));
+        // Links in the configured paths (such as /home -> /var/home) are the operator's choice and
+        // are resolved once here; the credential checks still reject any link inside the result.
+        let resolve = |path: PathBuf| std::fs::canonicalize(&path).unwrap_or(path);
+        let root = resolve(cfg.auth_dir());
+        let secrets = resolve(
+            cfg.notifications
+                .secrets_dir
+                .as_ref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| root.join(".notification-secrets")),
+        );
         Self {
             inner: Mutex::new(Inner { store: None, error: None, warning: None, tests: BTreeMap::new() }),
             root,

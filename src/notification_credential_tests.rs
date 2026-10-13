@@ -769,6 +769,27 @@ async fn managed_credential_replacement_rejects_symlink_and_hardlink_targets() {
 }
 
 #[tokio::test]
+async fn managed_credentials_work_when_the_configured_auth_path_is_a_symlink() {
+    // Like Fedora Atomic's /home -> /var/home, the operator's path reaches the real directory through a link.
+    let temp = Temp::new();
+    std::fs::create_dir(temp.0.join("var-auth")).unwrap();
+    std::os::unix::fs::symlink(temp.0.join("var-auth"), temp.0.join("auth")).unwrap();
+    let app = app(&temp, None);
+    let (origin, _server) = serve(app).await;
+    let saved =
+        authenticated(&reqwest::Client::new(), reqwest::Method::PUT, &credential_route(&origin, "ops"), &origin)
+            .json(&json!({"url":"https://hooks.example.invalid/through-a-link"}))
+            .send()
+            .await
+            .unwrap();
+    assert_eq!(saved.status(), StatusCode::OK);
+    let record: Value =
+        serde_json::from_slice(&std::fs::read(temp.0.join("var-auth/.notification-credentials/ops.json")).unwrap())
+            .unwrap();
+    assert_eq!(record["url"], "https://hooks.example.invalid/through-a-link");
+}
+
+#[tokio::test]
 async fn invalid_external_credentials_remain_authoritative_and_cannot_be_replaced_by_managed_values() {
     let temp = Temp::new();
     let app = app(&temp, None);
