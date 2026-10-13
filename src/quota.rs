@@ -105,13 +105,7 @@ impl Quota {
         Some(100.0 - used.clamp(0.0, 100.0))
     }
 
-    #[cfg(test)]
-    /// Use the normal routing-only refresh schedule for baseline tests.
     fn needs_refresh(&self, now: DateTime<Utc>) -> bool {
-        self.needs_refresh_for(now, false)
-    }
-    /// Retain failure backoff while polling authoritatively for notifications even on busy subscriptions.
-    fn needs_refresh_for(&self, now: DateTime<Utc>, notifications: bool) -> bool {
         // A check that brought no data waits 2, 4, 8 ... up to 30 minutes before the next.
         if self.check_failures > 0
             && let Some(at) = self.checked_at
@@ -120,8 +114,7 @@ impl Quota {
             return false;
         }
         let Some(refreshed) = self.refreshed_at else { return true };
-        let busy =
-            !notifications && self.updated_at.is_some_and(|u| u > refreshed && (now - u).num_seconds() < POLL_EVERY);
+        let busy = self.updated_at.is_some_and(|u| u > refreshed && (now - u).num_seconds() < POLL_EVERY);
         (now - refreshed).num_seconds() >= if busy { BUSY_POLL_EVERY } else { POLL_EVERY }
     }
 
@@ -427,7 +420,7 @@ pub async fn poller(app: Arc<App>) {
                 let deadline_check = reset_due
                     && st.quota.check_failures == 0
                     && st.quota.checked_at.is_none_or(|checked| (now - checked).num_seconds() >= 60);
-                !st.disabled && (st.quota.needs_refresh_for(now, app.cfg().notifications.enabled) || deadline_check)
+                !st.disabled && (st.quota.needs_refresh(now) || deadline_check)
             };
             if !stale || crate::oauth::ensure_fresh(&app, &acct, chrono::Duration::minutes(5), false).await.is_err() {
                 continue;

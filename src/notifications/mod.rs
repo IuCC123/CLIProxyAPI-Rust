@@ -712,7 +712,11 @@ pub async fn worker(app: Arc<App>) {
                     })
                 })
             };
-            if awaiting_confirmation || st.notification_evidence.overflow || confirmation_needed {
+            // A subscription can stay exhausted for days, so its confirmation polls keep the
+            // normal 5-minute pace; one-off recovery hints are confirmed straight away.
+            let confirmation_due =
+                st.quota.refreshed_at.is_none_or(|at| Utc::now() - at >= chrono::Duration::minutes(5));
+            if (awaiting_confirmation && confirmation_due) || st.notification_evidence.overflow || confirmation_needed {
                 st.quota.refreshed_at = None;
             }
             snapshots.push((
@@ -1287,13 +1291,35 @@ mod tests {
             crate::quota::authoritative(&mut acct.state.lock(), vec![sample("week", used)], None);
             consumed(&app, &acct).await;
             assert_waiting(&app);
-            acct.state.lock().quota.refreshed_at = Some(Utc::now());
+            let polled = Utc::now();
+            acct.state.lock().quota.refreshed_at = Some(polled);
             tokio::time::sleep(Duration::from_millis(1200)).await;
-            assert!(acct.state.lock().quota.refreshed_at.is_none());
+            assert_eq!(acct.state.lock().quota.refreshed_at, Some(polled), "{kind}: a fresh poll is not repeated");
+            acct.state.lock().quota.refreshed_at = Some(polled - chrono::Duration::minutes(5));
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            assert!(acct.state.lock().quota.refreshed_at.is_none(), "{kind}: confirmation polls continue");
             assert_waiting(&app);
             task.abort();
             let _ = task.await;
         }
+    }
+    #[tokio::test]
+    async fn headerless_quota_rejection_does_not_poll_every_minute() {
+        let (_temp, app, acct) = fixture(true);
+        let task = tokio::spawn(worker(app.clone()));
+        let reset = Utc::now() + chrono::Duration::hours(4);
+        // A Codex WebSocket rejection carries no usage headers, so its scope is unknown.
+        acct.cool_quota("gpt-6.1-sol", reset, "quota exhausted", acct.quota_epoch());
+        until_logs(&app, 1).await;
+        let windows = vec![
+            crate::quota::Window { resets_at: Some(reset), ..sample("5h", 100.0) },
+            crate::quota::Window { resets_at: Some(reset + chrono::Duration::days(3)), ..sample("week", 40.0) },
+        ];
+        crate::quota::authoritative(&mut acct.state.lock(), windows, None);
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert!(acct.state.lock().quota.refreshed_at.is_some(), "a poll that confirms exhaustion is not repeated");
+        task.abort();
+        let _ = task.await;
     }
     #[tokio::test]
     /// Verify that persisted available after restart waits for all fresh authoritative windows.
