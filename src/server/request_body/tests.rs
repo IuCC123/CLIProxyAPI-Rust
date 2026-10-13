@@ -142,6 +142,7 @@ async fn unsupported_or_stacked_encodings_are_rejected_and_logged() {
         let (status, response) = request(fixture.app.clone(), "/v1/responses", Some(encoding), b"{}".to_vec()).await;
         assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
         assert_eq!(response["error"]["message"], "unsupported Content-Encoding");
+        assert_eq!(response["error"]["type"], "invalid_request_error");
         fixture.assert_rejection(415);
     }
     let fixture = Fixture::new();

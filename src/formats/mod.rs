@@ -353,6 +353,7 @@ fn claude_error_type(status: u16) -> &'static str {
         403 => "permission_error",
         404 => "not_found_error",
         413 => "request_too_large",
+        415 => "invalid_request_error",
         429 => "rate_limit_error",
         529 => "overloaded_error",
         _ => "api_error",
@@ -361,7 +362,7 @@ fn claude_error_type(status: u16) -> &'static str {
 
 fn openai_error_type(status: u16) -> &'static str {
     match status {
-        400 | 404 | 413 => "invalid_request_error",
+        400 | 404 | 413 | 415 => "invalid_request_error",
         401 | 403 => "authentication_error",
         429 => "rate_limit_exceeded",
         _ => "server_error",
@@ -370,7 +371,7 @@ fn openai_error_type(status: u16) -> &'static str {
 
 fn gemini_status(status: u16) -> &'static str {
     match status {
-        400 => "INVALID_ARGUMENT",
+        400 | 413 | 415 => "INVALID_ARGUMENT",
         401 => "UNAUTHENTICATED",
         403 => "PERMISSION_DENIED",
         404 => "NOT_FOUND",
