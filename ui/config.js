@@ -2,7 +2,7 @@
 
 const CONFIG_SECTIONS = [
   ['server', 'Server'], ['access', 'Access'], ['routing', 'Routing'], ['connections', 'Connections'],
-  ['providers', 'Providers'], ['models', 'Models'], ['diagnostics', 'Diagnostics'], ['yaml', 'YAML file'],
+  ['providers', 'Providers'], ['models', 'Models'], ['notifications', 'Notifications'], ['diagnostics', 'Diagnostics'], ['yaml', 'YAML file'],
 ];
 const CONFIG_PROVIDERS = [
   ['claude', 'Claude', 'claude-api-key'], ['codex', 'OpenAI / Codex', 'codex-api-key'],
@@ -51,7 +51,7 @@ function configField(path, label, opts = {}) {
   const input = `<input id="${id}" data-cfg="${configPath(path)}" ${opts.nullable ? 'data-nullable="true"' : ''}
     type="${opts.type || 'text'}" value="${esc(shown)}" placeholder="${esc(placeholder)}" ${secret ? 'data-secret="true"' : ''}
     ${opts.mono !== false ? 'class="mono" spellcheck="false"' : ''}
-    ${opts.required && !(secret && value) ? 'required' : ''} ${opts.min != null ? `min="${opts.min}"` : ''}
+    ${opts.readonly ? 'readonly' : ''} ${opts.required && !(secret && value) ? 'required' : ''} ${opts.min != null ? `min="${opts.min}"` : ''}
     ${opts.max != null ? `max="${opts.max}"` : ''} ${opts.type === 'number' ? 'step="1"' : ''}
     ${secret ? 'autocomplete="new-password"' : 'autocomplete="off"'}
     aria-describedby="${opts.help ? `${id}-help ` : ''}${id}-error" ${error ? 'aria-invalid="true"' : ''}>`;
@@ -77,8 +77,8 @@ function configSwitch(path, label, help = '', restart = false) {
       ${help ? `aria-describedby="${id}-help"` : ''} data-config-act="switch" data-path="${configPath(path)}"></button></div>`;
 }
 
-function configRemove(path, label = 'Remove row') {
-  return `<button type="button" class="btn ghost small danger" data-config-act="remove" data-path="${configPath(path)}" aria-label="${esc(label)}">Remove</button>`;
+function configRemove(path, label = 'Remove row', disabled = false) {
+  return `<button type="button" class="btn ghost small danger" data-config-act="remove" data-path="${configPath(path)}" aria-label="${esc(label)}" ${disabled ? 'disabled' : ''}>Remove</button>`;
 }
 
 function configStrings(path, label, help = '', secret = false) {
@@ -211,6 +211,296 @@ function configDiagnosticsHTML() {
     ${S.config.ignored.length ? `<p class="cfg-description">These settings are retained in the file but have no effect in CLIProxyAPI-Rust.</p><ul class="cfg-notices">${S.config.ignored.map((s) => `<li>${esc(s)}</li>`).join('')}</ul>` : '<p class="cfg-description">No ignored CLIProxyAPI features were detected.</p>'}`;
 }
 
+const NOTIFICATION_FORMATS = [['generic', 'Generic webhook'], ['discord', 'Discord'], ['slack', 'Slack'],
+  ['mattermost', 'Mattermost'], ['teams', 'Microsoft Teams'], ['telegram', 'Telegram']];
+
+/** List supported IANA zones while retaining the configured value. */
+function notificationTimeZones() {
+  let zones = ['America/Denver', 'America/New_York', 'America/Chicago', 'America/Los_Angeles', 'Europe/London', 'Asia/Tokyo'];
+  try { if (Intl.supportedValuesOf) zones = Intl.supportedValuesOf('timeZone'); } catch {}
+  const current = configGet(['notifications', 'time-zone']) || 'UTC';
+  return ['UTC', ...[...new Set([...zones, current])].filter((zone) => zone !== 'UTC').sort()].map((zone) => [zone, zone]);
+}
+
+/** Render delivery timestamps in the configured notification zone. */
+function notificationLogTime(timestamp) {
+  if (!timestamp) return '—';
+  const date = new Date(timestamp);
+  try { return date.toLocaleString(undefined, { timeZone: S.notifications.status?.time_zone || 'UTC', timeZoneName: 'short' }); }
+  catch { return date.toISOString().replace('T', ' ').replace('.000Z', ' UTC'); }
+}
+
+/** Render sanitized delivery activity newest first and mask account names in privacy mode. */
+function notificationActivityHTML() {
+  const n = S.notifications;
+  const status = n.status;
+  const logs = (status?.logs || []).filter((row) => !n.filter || row.destination === n.filter)
+    .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+  return `<div class="cfg-section-head"><h3>Delivery activity</h3><button type="button" class="btn ghost small" data-config-act="refresh-notifications" ${n.loading ? 'disabled' : ''}>${n.loading ? 'Refreshing…' : 'Refresh activity'}</button></div>
+    ${n.error ? `<p class="msg err" role="alert">${esc(n.error)}</p>` : ''}
+    ${status ? `<p class="cfg-description" role="status">${status.enabled ? (status.active ? 'Monitoring active' : 'Monitoring unavailable') : 'Notifications off'} · ${fmt(status.pending)} pending deliveries${status.error ? ` · ${esc(status.error)}` : ''}</p>${status.warning ? `<p class="msg warn" role="status">${esc(status.warning)}</p>` : ''}` : '<p class="cfg-description">Loading delivery status…</p>'}
+    <p class="cfg-description">Recent attempts show safe status details. Activity refreshes every five seconds while this section is open.</p>
+    <div class="field cfg-provider-select"><label for="notification-log-filter">Destination</label><select id="notification-log-filter" data-notification-filter><option value="">All destinations</option>
+      ${[...new Set([...(status?.destinations || []).map((d) => d.id), ...(status?.logs || []).map((row) => row.destination)])].map((id) => `<option value="${esc(id)}" ${n.filter === id ? 'selected' : ''}>${esc(id)}</option>`).join('')}</select></div>
+    ${logs.length ? `<div class="table-wrap notification-log"><table><thead><tr><th>Time</th><th>Destination / event</th><th>Subscription / window</th><th>Attempt</th><th>Outcome</th></tr></thead><tbody>
+      ${logs.map((row) => `<tr><td class="mono" title="${esc(row.timestamp)}">${esc(notificationLogTime(row.timestamp))}</td>
+        <td>${esc(row.destination)}<small>${esc(row.event)}</small></td><td>${esc(row.event === 'notification.test' ? 'Notification test' : row.display_name ? (S.private ? HIDDEN : row.display_name) : 'Subscription unavailable')}<small>${esc(row.window || '—')}</small></td>
+        <td class="mono">${esc(row.attempt)}</td><td>${esc(row.outcome)}${row.detail ? `<small>${esc(row.detail)}</small>` : ''}${row.http_status ? `<small>HTTP ${esc(row.http_status)}</small>` : ''}</td></tr>`).join('')}</tbody></table></div>` : '<p class="cfg-empty">No delivery attempts to show yet. Save a destination and send a test to check its setup.</p>'}`;
+}
+
+/** Accept only a normalized HTTPS origin without credentials, paths or URL suffixes. */
+function notificationPublicOrigin(value) {
+  if (typeof value !== 'string' || !value || value.length > 300 || !/^https:\/\/[^/?#\\\s@]+\/?$/i.test(value)) return null;
+  try {
+    const u = new URL(value);
+    if (u.protocol !== 'https:' || !u.hostname || u.username || u.password || u.pathname !== '/' || u.search || u.hash || /[?#@\\]/.test(value)) return null;
+    return u.origin;
+  } catch { return null; }
+}
+
+/** Require HTTPS at the confirmed origin or direct localhost before enabling secret entry. */
+function notificationCredentialSecure() {
+  const publicURL = S.notifications.status?.credential_public_url;
+  if (publicURL) return location.protocol === 'https:' && notificationPublicOrigin(publicURL) === location.origin;
+  return location.protocol === 'https:' || ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+}
+
+/** Explain opt-in secret-entry readiness using safe server status categories. */
+function notificationSecretEntryStatus() {
+  const n = S.notifications;
+  if (configDirty() || rawDirty()) return 'Save settings to apply changes.';
+  if (!n.status) return 'Checking secret entry settings…';
+  if (!n.status.credential_ui_enabled) return 'Secret entry is off. Existing credentials keep delivering notifications.';
+  if (!notificationCredentialSecure()) return 'Open the dashboard at the saved HTTPS address to enter secrets.';
+  if (n.status.credential_ui_ready) return 'Ready for secret entry.';
+  if (n.status.credential_ui_reason === 'credential_https_required') return 'Confirm the Public dashboard URL below and save settings.';
+  return 'This connection cannot enter secrets. Check the saved dashboard address and authentication.';
+}
+
+/** Render the secret-entry opt-in and dashboard-origin confirmation within Config. */
+function notificationSecretEntryHTML() {
+  return `<section aria-label="Secret entry"><h3>Secret entry</h3>
+    ${configSwitch(['notifications', 'credential-ui-enabled'], 'Allow secret entry', 'Enable adding, replacing and removing credentials in this dashboard. Saved credentials continue working when this is off.')}
+    ${configField(['notifications', 'credential-public-url'], 'Public dashboard URL', { placeholder: location.protocol === 'https:' ? location.origin : 'https://proxy.example.com', help: 'Confirm the HTTPS address used to open this dashboard, then save settings. Takes effect immediately. Leave blank for direct localhost or native server HTTPS.' })}
+    ${location.protocol === 'https:' ? '<button type="button" class="btn ghost small" data-config-act="notification-current-url">Use current address</button>' : ''}
+    <p class="cfg-description" id="notification-secret-entry-status" role="status">${esc(notificationSecretEntryStatus())}</p>
+    <p class="cfg-description">This setting relies on your deployment providing HTTPS at the confirmed address.</p></section>`;
+}
+
+/** Render write-only credential controls and protect externally managed or unsaved destinations. */
+function notificationCredentialControls(d, saved, index) {
+  const n = S.notifications;
+  const dirty = configDirty() || rawDirty();
+  const disabled = dirty || !!n.busy;
+  const message = n.credentialMsg?.id === d.id ? n.credentialMsg : null;
+  const note = `<p class="msg ${message?.kind || ''}" data-credential-message role="status" ${message ? '' : 'hidden'}>${esc(message?.text || '')}</p>`;
+  if (!saved) return `<p class="cfg-description">${dirty ? 'Save this destination before adding credentials.' : 'Loading credential status…'}</p>${note}`;
+  if (saved.credential_source === 'external') return `<p class="cfg-description">Externally managed · ${saved.credential_ready ? 'Credentials available' : 'Credentials missing or invalid'}. Update the server-provisioned files or environment variables.</p>${note}`;
+  if (!saved.credential_editable) return `<p class="cfg-description">Manage credentials with server-provisioned files or environment variables on this server.</p>${note}`;
+  if (!n.status?.credential_ui_enabled) return `<p class="cfg-description">${saved.credential_configured ? 'Configured. ' : ''}Enable <strong>Allow secret entry</strong> above and save settings to manage credentials.</p>${note}`;
+  if (!notificationCredentialSecure()) return `<p class="cfg-description">Open this dashboard at the saved HTTPS address, or use direct localhost when no public URL is set.</p>${note}`;
+  if (!n.status?.credential_ui_ready) return `<p class="cfg-description">Complete <strong>Secret entry</strong> setup above before adding or changing credentials.</p>${note}`;
+  if (n.credentialEditor === d.id) return `<div data-credential-editor="${esc(d.id)}">
+      <p class="cfg-description">Enter new credentials. Saved values are never shown. Saving replaces the URL and bearer token; leave the token blank when it is not needed.</p>
+      <div class="cfg-grid"><div class="field"><label for="notification-url-${index}">Webhook URL</label>
+        <input id="notification-url-${index}" data-credential-url type="password" required maxlength="8192" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://…"></div>
+      <div class="field"><label for="notification-bearer-${index}">Bearer token (optional)</label>
+        <input id="notification-bearer-${index}" data-credential-bearer type="password" maxlength="8192" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Leave blank when not needed"></div></div>
+      <div class="cfg-foot-actions"><button type="button" class="btn small primary" data-config-act="save-notification-credentials" data-destination="${esc(d.id)}" ${disabled ? 'disabled' : ''}>Save credentials</button>
+        <button type="button" class="btn small ghost" data-config-act="cancel-notification-credentials">Cancel</button></div></div>${note}`;
+  if (n.credentialRemove === d.id) return `<p class="cfg-description">Remove credentials for this destination? Notifications cannot be delivered until you add credentials again.</p>
+      <div class="cfg-foot-actions"><button type="button" class="btn small danger" data-config-act="confirm-remove-notification-credentials" data-destination="${esc(d.id)}" ${disabled ? 'disabled' : ''}>Remove</button>
+        <button type="button" class="btn small ghost" data-config-act="cancel-notification-credentials">Keep credentials</button></div>${note}`;
+  return `<p class="cfg-description">${saved.credential_configured ? (saved.credential_ready ? 'Configured' : 'Configured · credentials invalid') : 'Not configured'} · Saved credentials stay private on the server.</p>
+    <div class="cfg-foot-actions"><button type="button" class="btn small" data-config-act="edit-notification-credentials" data-destination="${esc(d.id)}" ${disabled ? 'disabled' : ''}>${saved.credential_configured ? 'Replace credentials' : 'Add credentials'}</button>
+      ${saved.credential_configured ? `<button type="button" class="btn small ghost danger" data-config-act="remove-notification-credentials" data-destination="${esc(d.id)}" ${disabled ? 'disabled' : ''}>Remove credentials</button>` : ''}</div>${note}`;
+}
+
+/** Submit a same-origin credential mutation without retaining values in application state. */
+async function mutateNotificationCredentials(id, method, body) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (S.key) headers.Authorization = `Bearer ${S.key}`;
+  const response = await fetch(`/api/notifications/${encodeURIComponent(id)}/credentials`, { method, headers, body, cache: 'no-store', credentials: 'same-origin' });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    const messages = {
+      credential_ui_disabled: 'Enable Allow secret entry in Settings before updating credentials.',
+      credential_https_required: 'Confirm the Public dashboard URL in Settings, or use direct localhost or native server HTTPS.',
+      credential_authorization_header_required: 'Unlock the dashboard again before updating credentials.',
+      credential_origin_mismatch: 'Open the dashboard at the saved Public dashboard URL before updating credentials.',
+      credential_origin_required: 'Open the dashboard directly to update credentials.',
+      credential_cross_site_request_rejected: 'Open this dashboard directly to update credentials.',
+      credentials_externally_managed: 'These credentials are managed through server files or environment variables.',
+      destination_unavailable: 'Save this destination before adding credentials.',
+      invalid_url: 'Enter a complete HTTPS webhook URL.',
+      unsafe_url: 'Use an HTTPS webhook URL without a username, password or fragment.',
+      invalid_bearer: 'Enter a bearer token without line breaks.',
+      credential_too_large: 'The webhook URL and bearer token must each be at most 8 KiB.',
+      credential_body_too_large: 'The credential request is too large.',
+      insecure_credential_directory: 'The server credential directory needs private ownership and permissions.',
+      insecure_credential_file: 'The server credential file needs private ownership and permissions.',
+      credential_unavailable: 'The server could not access its private credential storage.',
+    };
+    // Only known messages enter page state, even if a proxy returns an unexpected response.
+    throw new ApiError(response.status, Object.hasOwn(messages, data.error) ? messages[data.error] : 'Credentials could not be updated. Check the server connection and credential storage.');
+  }
+}
+
+/** Read password fields only for submission and clear them even when the server rejects the save. */
+async function saveNotificationCredentials(id) {
+  const n = S.notifications;
+  if (n.busy || configDirty() || rawDirty() || !n.status?.credential_ui_ready || !notificationCredentialSecure()) return;
+  const editor = document.querySelector(`[data-credential-editor="${CSS.escape(id)}"]`);
+  if (!editor) return;
+  const urlInput = editor.querySelector('[data-credential-url]');
+  const tokenInput = editor.querySelector('[data-credential-bearer]');
+  urlInput.setCustomValidity(''); tokenInput.setCustomValidity('');
+  let url = urlInput.value.trim(); let bearer = tokenInput.value.trim();
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.hash || new TextEncoder().encode(url).length > 8192) throw new Error();
+  } catch { urlInput.setCustomValidity('Enter a complete HTTPS webhook URL without a username, password or fragment.'); urlInput.reportValidity(); return; }
+  if (/[\r\n]/.test(bearer) || new TextEncoder().encode(bearer).length > 8192) {
+    tokenInput.setCustomValidity('Enter a bearer token up to 8 KiB without line breaks.'); tokenInput.reportValidity(); return;
+  }
+  // Secrets live only in these inputs and the request, never in config drafts or browser storage.
+  let body = JSON.stringify({ url, bearer_token: bearer });
+  urlInput.value = ''; tokenInput.value = ''; url = ''; bearer = '';
+  n.busy = `credentials:${id}`; n.credentialEditor = null; n.credentialRemove = null; n.credentialMsg = null; render();
+  try {
+    const request = mutateNotificationCredentials(id, 'PUT', body); body = ''; await request;
+    n.credentialMsg = { id, kind: 'ok', text: 'Credentials saved. Send a test notification to check delivery.' };
+  } catch (e) { n.credentialMsg = { id, kind: 'err', text: e.message === 'Failed to fetch' ? 'Could not reach the server. Enter credentials again to retry.' : e.message }; }
+  finally { body = ''; n.busy = null; }
+  await loadNotifications();
+  if (S.route === 'config' && S.config.section === 'notifications') render();
+}
+
+/** Require inline confirmation before removing a managed credential bundle. */
+async function removeNotificationCredentials(id) {
+  const n = S.notifications;
+  if (n.busy || configDirty() || rawDirty() || !n.status?.credential_ui_ready || !notificationCredentialSecure()) return;
+  n.busy = `credentials:${id}`; n.credentialRemove = null; n.credentialMsg = null; render();
+  try {
+    await mutateNotificationCredentials(id, 'DELETE');
+    n.credentialMsg = { id, kind: 'ok', text: 'Credentials removed.' };
+  } catch (e) { n.credentialMsg = { id, kind: 'err', text: e.message }; }
+  n.busy = null;
+  await loadNotifications();
+  if (S.route === 'config' && S.config.section === 'notifications') render();
+}
+
+/** Render notification settings using the existing Config grid and control styles. */
+function configNotificationsHTML() {
+  const list = configGet(['notifications', 'destinations']) || [];
+  const n = S.notifications;
+  if (!n.status && !n.loading && !n.error) loadNotifications();
+  return `<div class="cfg-section-head"><h2>Notifications</h2><button type="button" class="btn" data-config-act="add-notification">Add destination</button></div>
+    <p class="cfg-description">Get an alert when a Claude or Codex subscription hits a quota, and another when fresh provider data confirms it has recovered. A weekly limit can still block a recovered 5-hour window.</p>
+    ${configSwitch(['notifications', 'enabled'], 'Quota notifications', 'Monitor all enabled Claude and Codex subscriptions, including idle accounts. Other providers do not yet expose supported quota monitoring.')}
+    <p class="cfg-description">Messages include the subscription display name from Accounts, which may be an email address.</p>
+    <div class="cfg-grid">${configSelect(['notifications', 'time-zone'], 'Notification time zone', notificationTimeZones(), { help: 'Use this time zone for observed and estimated reset times. Daylight saving changes apply automatically; no restart needed.' })}</div>
+    <button type="button" class="btn ghost small" data-config-act="notification-browser-zone">Use browser time zone</button>
+    ${configSwitch(['notifications', 'provider-logos'], 'Provider logos', 'Add a Claude or ChatGPT logo thumbnail to Discord quota alerts. Test messages preview both logos. Other platforms keep their existing message format.')}
+    <div class="cfg-divider"></div>${notificationSecretEntryHTML()}<div class="cfg-divider"></div>
+    <p class="cfg-description">Save a destination, then add its webhook URL and optional bearer token below. Credentials are saved separately from config.yaml and cannot be retrieved through the dashboard.</p>
+    <details class="cfg-advanced"><summary>Advanced credential setup<span class="cfg-chevron" aria-hidden="true">›</span></summary>
+      <p class="cfg-description">For server-provisioned credentials, use a private file named <code>&lt;id&gt;.url</code> in the notification secrets directory. An optional <code>&lt;id&gt;.bearer</code> file supplies a bearer token. These credentials are managed outside the dashboard.</p>
+      <p class="cfg-description">The default directory is <code>.notification-secrets</code> inside your credentials directory. Alternatively, set <code>CLIPROXYAPI_NOTIFY_&lt;ID&gt;_URL</code> and optional <code>CLIPROXYAPI_NOTIFY_&lt;ID&gt;_BEARER_TOKEN</code> before starting the server; uppercase the ID and replace hyphens with underscores. Files must have private permissions. Self-hosted private destinations need operator-configured network permissions and a restart.</p>
+      <p class="cfg-description">Telegram uses its full <code>sendMessage</code> URL as the secret, plus a chat ID below. Teams uses a Workflows webhook that accepts Adaptive Cards. Setup and troubleshooting: <code>docs/notifications.md</code>.</p></details>
+    ${list.length ? list.map((d, i) => {
+      const path = ['notifications', 'destinations', i];
+      const saved = n.status?.destinations?.find((row) => row.id === d.id);
+      const credentialsLocked = saved?.credential_source === 'managed' && saved.credential_configured;
+      const canTest = !configDirty() && !rawDirty() && n.status?.enabled && saved?.enabled && saved?.credential_ready && !n.busy;
+      return `<section class="notification-destination" aria-label="Destination ${i + 1}"><div class="cfg-list-head"><h3>Destination ${i + 1}</h3>${configRemove(path, `Remove destination ${i + 1}`, credentialsLocked)}</div>
+        <div class="cfg-grid">${configField([...path, 'id'], 'Destination ID', { required: true, readonly: credentialsLocked, placeholder: 'ops-discord', help: credentialsLocked ? 'Remove saved credentials before deleting this destination or changing its ID.' : 'Unique lowercase letters, numbers and hyphens; up to 32 characters. Credentials are associated with this ID.' })}
+          ${configSelect([...path, 'format'], 'Platform', NOTIFICATION_FORMATS)}
+          ${d.format === 'telegram' ? configField([...path, 'chat-id'], 'Telegram chat ID', { required: true, placeholder: '-1001234567890', help: 'The chat or channel your bot can send messages to.' }) : ''}</div>
+        ${configSwitch([...path, 'enabled'], 'Enable destination', 'Send quota events to this destination when quota notifications are on.')}
+        <div id="notification-credentials-${i}" data-notification-credentials="${esc(d.id)}">${notificationCredentialControls(d, saved, i)}</div>
+        <div class="notification-test"><button type="button" class="btn small" data-config-act="test-notification" data-destination="${esc(d.id)}" ${canTest ? '' : 'disabled'}>${n.busy === d.id ? 'Sending…' : 'Send test notification'}</button>
+          <span class="cfg-description" data-notification-credential="${esc(d.id)}">${configDirty() || rawDirty() ? 'Save changes before testing.' : saved ? (saved.credential_ready ? 'Credentials available' : 'Credentials missing or invalid') : 'Save this destination to check its credentials.'}</span></div></section>`;
+    }).join('') : '<div class="cfg-empty-state"><h3>No destinations configured</h3><p>Add a destination, choose its platform and save. Then add credentials and send a test notification.</p></div>'}
+    ${n.testMsg ? `<p class="msg ${n.testMsg.kind}" role="status">${esc(n.testMsg.text)}</p>` : ''}
+    <div class="cfg-divider"></div><div id="notification-activity">${notificationActivityHTML()}</div>`;
+}
+
+/** Refresh sanitized status while preserving the active settings draft. */
+async function loadNotifications() {
+  const n = S.notifications;
+  if (n.loading || S.locked) return;
+  n.loading = true;
+  try { n.status = await api('/notifications'); n.error = null; }
+  catch (e) { n.error = e.message; }
+  n.loading = false;
+  if (S.route === 'config' && S.config.section === 'notifications') {
+    if ((!n.status?.credential_ui_ready || !notificationCredentialSecure()) && (n.credentialEditor || n.credentialRemove)) {
+      n.credentialEditor = null; n.credentialRemove = null; render();
+    }
+    patchNotificationActivity();
+    updateNotificationActions();
+  }
+}
+
+/** Update the activity table without replacing credential inputs or form drafts. */
+function patchNotificationActivity() {
+  const focus = document.activeElement?.id;
+  const scroll = document.querySelector('.notification-log')?.scrollTop || 0;
+  patch('notification-activity', notificationActivityHTML);
+  const log = document.querySelector('.notification-log');
+  if (log) log.scrollTop = scroll;
+  if (focus === 'notification-log-filter') document.getElementById(focus)?.focus({ preventScroll: true });
+}
+
+/** Disable credential and destination mutations until their saved configuration is safe to edit. */
+function updateNotificationActions() {
+  const n = S.notifications;
+  const dirty = configDirty() || rawDirty();
+  const entryStatus = document.getElementById('notification-secret-entry-status');
+  if (entryStatus) entryStatus.textContent = notificationSecretEntryStatus();
+  const destinations = configGet(['notifications', 'destinations']) || [];
+  for (const [index, d] of destinations.entries()) {
+    const panel = document.getElementById(`notification-credentials-${index}`);
+    if (!panel || n.credentialEditor === d.id || n.credentialRemove === d.id) continue;
+    const saved = n.status?.destinations?.find((row) => row.id === d.id);
+    const locked = saved?.credential_source === 'managed' && saved.credential_configured;
+    const card = panel.closest('.notification-destination');
+    const idInput = document.getElementById(configId(['notifications', 'destinations', index, 'id']));
+    if (idInput) idInput.readOnly = !!locked;
+    const removeButton = card.querySelector('[data-config-act="remove"]');
+    if (removeButton) removeButton.disabled = !!locked;
+    const signature = JSON.stringify([d.id, saved?.credential_source, saved?.credential_configured, saved?.credential_ready, saved?.credential_editable, n.status?.credential_ui_enabled, n.status?.credential_ui_ready, n.status?.credential_public_url, dirty, n.busy, n.credentialMsg]);
+    if (panel.dataset.signature !== signature) {
+      panel.innerHTML = notificationCredentialControls(d, saved, index);
+      panel.dataset.signature = signature;
+    }
+  }
+  for (const button of document.querySelectorAll('[data-config-act="save-notification-credentials"], [data-config-act="confirm-remove-notification-credentials"]')) {
+    button.disabled = dirty || !!n.busy || !n.status?.credential_ui_ready || !notificationCredentialSecure();
+  }
+  for (const button of document.querySelectorAll('[data-config-act="test-notification"]')) {
+    const saved = n.status?.destinations?.find((row) => row.id === button.dataset.destination);
+    button.disabled = dirty || !n.status?.enabled || !saved?.enabled || !saved?.credential_ready || !!n.busy;
+    const note = button.parentElement.querySelector('[data-notification-credential]');
+    if (note) note.textContent = dirty ? 'Save changes before testing.' : saved ? (saved.credential_ready ? 'Credentials available' : 'Credentials missing or invalid') : 'Save this destination to check its credentials.';
+  }
+}
+
+/** Request one test delivery and display only the sanitized result. */
+async function testNotification(id) {
+  const n = S.notifications;
+  if (n.busy || configDirty() || rawDirty()) return;
+  n.busy = id; n.testMsg = null; render();
+  try {
+    const result = await api(`/notifications/${encodeURIComponent(id)}/test`, { method: 'POST', body: '{}' });
+    n.testMsg = { kind: 'ok', text: result.delivered ? 'Test notification delivered.' : 'Check delivery activity for the test outcome.' };
+  } catch (e) { n.testMsg = { kind: 'err', text: e.message }; }
+  n.busy = null;
+  await loadNotifications();
+  if (S.route === 'config') render();
+}
+
 // The whole file, for settings the sections don't cover. One kind of edit at a time:
 // form drafts and YAML drafts never pile up on top of each other.
 const rawDirty = () => S.config.raw.text != null && S.config.raw.text !== S.config.raw.saved;
@@ -287,7 +577,7 @@ function configHTML() {
     return skeletonHTML();
   }
   const sections = { server: configServerHTML, access: configAccessHTML, routing: configRoutingHTML,
-    connections: configConnectionsHTML, providers: configProvidersHTML, models: configModelsHTML, diagnostics: configDiagnosticsHTML, yaml: configYamlHTML };
+    connections: configConnectionsHTML, providers: configProvidersHTML, models: configModelsHTML, notifications: configNotificationsHTML, diagnostics: configDiagnosticsHTML, yaml: configYamlHTML };
   return `<div class="page-head"><div><h1>Configuration</h1><p class="mono cfg-path">${esc(home(c.path))}</p></div>
       <button type="button" class="btn ghost" data-config-act="reload" ${c.busy ? 'disabled' : ''}>Reload settings</button></div>
     ${c.reloadConfirm ? '<div class="cfg-banner"><span>Reloading will discard your unsaved changes.</span><button class="btn small" data-config-act="confirm-reload">Reload and discard</button><button class="btn ghost small" data-config-act="cancel-reload">Keep editing</button></div>' : ''}
@@ -319,6 +609,7 @@ async function loadConfig() {
 function configUpdateFoot() {
   const foot = $('#config-foot');
   if (foot) foot.innerHTML = configFootHTML();
+  updateNotificationActions();
 }
 
 function configError(path, message) {
@@ -362,6 +653,19 @@ function configValidate() {
     if (!v.tls.key?.trim()) invalid(['tls', 'key'], 'Enter a private key path.');
   }
   if ('proxy-url' in changed) checkURL(['proxy-url'], true);
+  if ('notifications' in changed) {
+    const zone = v.notifications['time-zone'];
+    if (typeof zone !== 'string' || !zone || zone.length > 64) invalid(['notifications', 'time-zone'], 'Choose a notification time zone.');
+    const publicURL = v.notifications['credential-public-url'];
+    if (publicURL && !notificationPublicOrigin(publicURL)) invalid(['notifications', 'credential-public-url'], 'Enter an HTTPS dashboard address without a path, query, fragment or credentials.');
+    const ids = new Set();
+    (v.notifications.destinations || []).forEach((d, i) => {
+      const path = ['notifications', 'destinations', i];
+      if (!/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(d.id || '') || ids.has(d.id)) invalid([...path, 'id'], 'Enter a unique ID: lowercase letters, numbers and internal hyphens, up to 32 characters.');
+      ids.add(d.id);
+      if (d.format === 'telegram' && !d['chat-id']?.trim()) invalid([...path, 'chat-id'], 'Enter a Telegram chat ID.');
+    });
+  }
   for (const [provider, , field] of CONFIG_PROVIDERS) {
     if (!(field in changed)) continue;
     (v[field] || []).forEach((entry, i) => {
@@ -397,6 +701,7 @@ function configValidate() {
       } else if (path[0] === 'api-keys') c.section = 'access';
       else if (['request-retry', 'session-affinity-idle-seconds', 'five-hour-reserve-percent'].includes(path[0])) c.section = 'routing';
       else if (path[0] === 'proxy-url') c.section = 'connections';
+      else if (path[0] === 'notifications') c.section = 'notifications';
       else c.section = 'server';
     }
     render(); document.getElementById(id)?.focus(); return false;
@@ -424,6 +729,7 @@ async function saveConfig() {
       ws?.close();
     }
     refreshAccounts();
+    if (c.section === 'notifications') loadNotifications();
   } catch (e) { c.msg = { kind: 'err', text: e.message }; }
   c.busy = false; render();
 }
@@ -451,7 +757,11 @@ function bindConfig() {
       S.config.raw.text = ta.value; configUpdateFoot();
     }
   });
-  form.addEventListener('submit', (e) => { e.preventDefault(); saveConfig(); });
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const editor = document.activeElement?.closest('[data-credential-editor]');
+    if (editor) saveNotificationCredentials(editor.dataset.credentialEditor); else saveConfig();
+  });
   form.addEventListener('input', (e) => {
     const input = e.target.closest('[data-cfg]');
     if (!input) return;
@@ -462,7 +772,7 @@ function bindConfig() {
     if (input.dataset.secret) S.config.secrets[JSON.stringify(path)] = true;
     configSet(path, value);
     configError(path, ''); S.config.msg = null;
-    if (path[0] === 'routing') { render(); document.getElementById(input.id)?.focus(); }
+    if (path[0] === 'routing' || (path[0] === 'notifications' && path.at(-1) === 'format')) { render(); document.getElementById(input.id)?.focus(); }
     else configUpdateFoot();
   });
   const updateHeaderName = (e) => {
@@ -499,6 +809,9 @@ function bindConfig() {
   };
   form.addEventListener('input', updateHeaderName);
   form.addEventListener('change', updateHeaderName);
+  form.addEventListener('change', (e) => {
+    if (e.target.matches('[data-notification-filter]')) { S.notifications.filter = e.target.value; patchNotificationActivity(); }
+  });
   form.addEventListener('toggle', (e) => {
     if (e.target.dataset.cfgOpen) S.config.opens[e.target.dataset.cfgOpen] = e.target.open;
   }, true);
@@ -515,6 +828,31 @@ document.addEventListener('click', (e) => {
   const act = button.dataset.configAct;
   const path = button.dataset.path ? JSON.parse(button.dataset.path) : null;
   if (act === 'save') return saveConfig();
+  if (act === 'refresh-notifications') return loadNotifications();
+  if (act === 'test-notification') return testNotification(button.dataset.destination);
+  if (act === 'notification-current-url') {
+    if (location.protocol !== 'https:') return;
+    configSet(['notifications', 'credential-public-url'], location.origin); c.msg = null; render();
+    document.getElementById(configId(['notifications', 'credential-public-url']))?.focus();
+    return;
+  }
+  if (act === 'save-notification-credentials') return saveNotificationCredentials(button.dataset.destination);
+  if (act === 'confirm-remove-notification-credentials') return removeNotificationCredentials(button.dataset.destination);
+  if (act === 'edit-notification-credentials' || act === 'remove-notification-credentials' || act === 'cancel-notification-credentials') {
+    const n = S.notifications;
+    if (n.busy || ((configDirty() || rawDirty()) && act !== 'cancel-notification-credentials')) return;
+    n.credentialEditor = act === 'edit-notification-credentials' ? button.dataset.destination : null;
+    n.credentialRemove = act === 'remove-notification-credentials' ? button.dataset.destination : null;
+    n.credentialMsg = null; render();
+    document.querySelector('[data-credential-url]')?.focus();
+    return;
+  }
+  if (act === 'notification-browser-zone') {
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    configSet(['notifications', 'time-zone'], zone); c.msg = null; render();
+    document.getElementById(configId(['notifications', 'time-zone']))?.focus();
+    return;
+  }
   if (act === 'discard') return discardConfig();
   if (act === 'reload') {
     if (configDirty() || rawDirty()) { c.reloadConfirm = true; render(); return; }
@@ -526,11 +864,18 @@ document.addEventListener('click', (e) => {
     if (c.section === 'yaml' && button.dataset.section !== 'yaml' && rawDirty()) {
       c.msg = { kind: 'err', text: 'Save or revert the file first.' }; configUpdateFoot(); return;
     }
-    c.section = button.dataset.section; c.msg = null; render(); $('.cfg-content h2')?.scrollIntoView({ block: 'nearest' }); return;
+    c.section = button.dataset.section; c.msg = null; render(); $('.cfg-content h2')?.scrollIntoView({ block: 'nearest' });
+    if (c.section === 'notifications') loadNotifications();
+    return;
   }
   if (act === 'provider') { c.provider = button.dataset.provider; render(); return; }
   if (act === 'switch') {
-    configSet(path, !configGet(path)); c.msg = null; render(); document.getElementById(configId(path))?.focus(); return;
+    configSet(path, !configGet(path));
+    if (path[0] === 'notifications' && path[1] === 'credential-ui-enabled' && configGet(path)
+        && !configGet(['notifications', 'credential-public-url']) && location.protocol === 'https:') {
+      configSet(['notifications', 'credential-public-url'], location.origin);
+    }
+    c.msg = null; render(); document.getElementById(configId(path))?.focus(); return;
   }
   if (act === 'reveal') {
     const input = document.getElementById(configId(path));
@@ -540,6 +885,11 @@ document.addEventListener('click', (e) => {
     return;
   }
   if (act === 'clear-secret') { configSet(path, ''); c.secrets[JSON.stringify(path)] = true; }
+  if (act === 'add-notification') {
+    const list = configGet(['notifications', 'destinations']) || [];
+    list.push({ id: '', format: 'discord', enabled: true });
+    configSet(['notifications', 'destinations'], list);
+  }
   if (act === 'add-provider') {
     const [provider, , field] = CONFIG_PROVIDERS.find(([p]) => p === c.provider);
     const list = c.values[field];

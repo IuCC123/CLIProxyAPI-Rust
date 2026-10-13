@@ -23,6 +23,7 @@ pub struct App {
     pub pool: Pool,
     pub sessions: Arc<crate::affinity::Sessions>,
     pub http: Http,
+    pub notifications: crate::notifications::Service,
     pub stats: Stats,
     pub logins: Mutex<HashMap<String, crate::mgmt::Login>>,
     pub reset_quotes: Mutex<HashMap<String, crate::banked_resets::Quote>>,
@@ -35,12 +36,14 @@ pub struct App {
 }
 
 impl App {
+    /// Construct shared application state with startup-pinned notification permissions and lazy journal access.
     pub fn new(cfg: Config, cfg_path: PathBuf) -> Arc<Self> {
         let pool = Pool::default();
         pool.reload(&cfg);
         let (live, _) = broadcast::channel(512);
         let sessions = Arc::new(crate::affinity::Sessions::load(&cfg.auth_dir(), cfg.session_affinity_idle_seconds));
         Arc::new(Self {
+            notifications: crate::notifications::Service::new(&cfg),
             http: Http::new(&cfg.proxy_url),
             startup_config: cfg.clone(),
             cfg: ArcSwap::from_pointee(cfg),

@@ -361,6 +361,13 @@ details[open] > summary > .cfg-chevron { transform: rotate(90deg); }
 .cfg-advanced > summary { display: flex; align-items: center; color: var(--fg-2); font-size: 13px; padding: 12px 0; cursor: pointer; list-style: none; border-top: 1px solid var(--line); }
 .cfg-advanced > .cfg-grid { margin-top: 16px; }
 .cfg-provider-select { max-width: 280px; margin: 20px 0 28px; }
+.notification-destination { border-top: 1px solid var(--line); padding: 20px 0; }
+.notification-destination .cfg-grid { margin-top: 20px; }
+.notification-test { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.notification-test .cfg-description { margin: 0; }
+.notification-log { max-height: 420px; overflow: auto; }
+.notification-log table { min-width: 620px; }
+.notification-log td small { display: block; color: var(--fg-3); font-size: 11px; margin-top: 4px; }
 .cfg-notices { padding-left: 20px; color: var(--fg-2); font-size: 13px; line-height: 1.8; }
 .cfg-banner { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 0; margin: 0 0 24px; font-size: 13px; }
 .cfg-banner > span { flex: 1; }

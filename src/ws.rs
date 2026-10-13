@@ -415,6 +415,7 @@ async fn connect(acct: &Arc<Account>, client_headers: &HeaderMap) -> Result<Upst
     Ok(ws)
 }
 
+/// Relay one native turn while binding streamed quota and rejection evidence to its request epoch.
 async fn native_turn(
     app: &Arc<App>,
     headers: &HeaderMap,
@@ -506,6 +507,7 @@ async fn native_turn(
     let mut tracker = Tracker::new(app, Format::Responses, true, "ws", &model);
     tracker.session(sess.key.as_deref(), sess.source, &cfg);
     tracker.selected(&selected);
+    tracker.request_epoch(quota_epoch);
     let payload = payload.to_string();
     let deadline = send_deadline(payload.len());
     if let Err(failure) =
@@ -593,7 +595,7 @@ async fn native_turn(
             && let Some((status, msg)) = error.clone()
         {
             if proxy::quota_exhausted(&acct, &model, status, &text) {
-                proxy::mark_quota_exhausted(&acct, &model, &reqwest::header::HeaderMap::new(), &text);
+                proxy::mark_quota_exhausted(&acct, &model, &reqwest::header::HeaderMap::new(), &text, quota_epoch);
                 app.broadcast("accounts", Value::Null);
                 if !forwarded {
                     sess.discard_upstream();

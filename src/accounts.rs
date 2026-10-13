@@ -311,6 +311,10 @@ pub struct AccountState {
     pub counters: Counters,
     /// Subscription usage windows (Claude, ChatGPT).
     pub quota: crate::quota::Quota,
+    pub notification_evidence: crate::notifications::state::Evidence,
+    pub notifications_enabled: bool,
+    /// In-memory cutoff also records pauses shorter than a notification worker tick.
+    pub notifications_changed_at: Option<DateTime<Utc>>,
 }
 
 /// Counts an actual request attempt, including streaming, until completion or cancellation.
@@ -523,8 +527,7 @@ impl Account {
     }
 
     /// Records confirmed quota exhaustion, unless a banked reset is being applied.
-    pub fn exhaust(&self, model: &str, until: DateTime<Utc>, reason: &str) {
-        let epoch = self.quota_epoch();
+    pub fn exhaust(&self, model: &str, until: DateTime<Utc>, reason: &str, epoch: u64) {
         self.cool_quota(model, until, reason, epoch);
     }
 
@@ -538,10 +541,14 @@ impl Account {
         self.state.lock().quota_epoch
     }
 
+    /// Apply a model quota rejection only if its request predates no newer usage or reset evidence.
     pub fn cool_quota(&self, model: &str, until: DateTime<Utc>, reason: &str, epoch: u64) {
         let mut st = self.state.lock();
-        if st.quota_epoch == epoch && !st.quota_refreshing {
+        if st.quota_epoch == epoch && !st.quota_refreshing && !st.disabled {
             st.quota_cooldowns.insert(model.to_string(), until);
+            if st.notifications_enabled {
+                st.notification_evidence.exhaust(model);
+            }
             st.last_error = Some(reason.to_string());
         }
     }
@@ -925,6 +932,7 @@ impl Pool {
         };
         allowed.then(|| a.resolve_with(model, matches!(only, Some(Only::Provider(_))))).flatten()
     }
+    /// Rebuild configured accounts while preserving compatible state and invalidating paused evidence.
     pub fn reload(&self, cfg: &Config) {
         self.force_prefix.store(cfg.force_model_prefix, std::sync::atomic::Ordering::Relaxed);
         let specs = collect(cfg);
@@ -949,11 +957,23 @@ impl Pool {
                     };
                     *prev.cred.write() = s.cred;
                     let mut st = prev.state.lock();
+                    if st.disabled != s.disabled || st.notifications_enabled != cfg.notifications.enabled {
+                        st.notifications_changed_at = Some(Utc::now());
+                        st.notification_evidence = Default::default();
+                    }
+                    if st.disabled != s.disabled {
+                        st.quota_epoch += 1;
+                    }
                     st.disabled = s.disabled;
+                    st.notifications_enabled = cfg.notifications.enabled;
+                    if !st.notifications_enabled {
+                        st.notification_evidence = Default::default();
+                    }
                     if identity_changed {
                         st.quota_epoch += 1;
                         st.quota_refreshing = false;
                         st.quota = Default::default();
+                        st.notification_evidence = Default::default();
                         st.quota_cooldowns.clear();
                         st.banked_resets = None;
                     }
@@ -965,6 +985,16 @@ impl Pool {
             let discovered = old.get(&s.id).map(|p| p.discovered.read().clone()).unwrap_or_default();
             let mut state = old
                 .get(&s.id)
+                .filter(|previous| {
+                    previous.provider == s.provider
+                        && match (&*previous.cred.read(), &s.cred) {
+                            (Credential::OAuth(old), Credential::OAuth(new)) => {
+                                old.account_id == new.account_id && old.base_url == new.base_url
+                            }
+                            (Credential::ApiKey { .. }, Credential::ApiKey { .. }) => true,
+                            _ => false,
+                        }
+                })
                 .map(|p| {
                     let st = p.state.lock();
                     AccountState {
@@ -976,11 +1006,27 @@ impl Pool {
                         last_used: st.last_used,
                         counters: st.counters.clone(),
                         quota: st.quota.clone(),
+                        quota_epoch: st.quota_epoch + u64::from(st.disabled != s.disabled),
+                        notification_evidence: if st.disabled != s.disabled
+                            || st.notifications_enabled != cfg.notifications.enabled
+                        {
+                            Default::default()
+                        } else {
+                            st.notification_evidence.clone()
+                        },
+                        notifications_changed_at: if st.disabled != s.disabled
+                            || st.notifications_enabled != cfg.notifications.enabled
+                        {
+                            Some(Utc::now())
+                        } else {
+                            st.notifications_changed_at
+                        },
                         ..Default::default()
                     }
                 })
                 .unwrap_or_default();
             state.disabled = s.disabled;
+            state.notifications_enabled = cfg.notifications.enabled;
             next.push(Arc::new(Account {
                 id: s.id,
                 provider: s.provider,
