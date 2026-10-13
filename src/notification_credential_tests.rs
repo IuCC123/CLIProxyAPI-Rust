@@ -769,6 +769,28 @@ async fn managed_credential_replacement_rejects_symlink_and_hardlink_targets() {
 }
 
 #[tokio::test]
+async fn external_secrets_created_after_startup_behind_a_symlink_are_read() {
+    let temp = Temp::new();
+    std::fs::create_dir(temp.0.join("var-secrets")).unwrap();
+    std::os::unix::fs::symlink(temp.0.join("var-secrets"), temp.0.join("secrets")).unwrap();
+    let external_dir = temp.0.join("secrets/notifications");
+    let (origin, _server) = serve(app(&temp, Some(&external_dir))).await;
+    std::fs::create_dir(&external_dir).unwrap();
+    private_file(&external_dir.join("ops.url"), "https://hooks.example.invalid/external");
+    let status: Value = reqwest::Client::new()
+        .get(format!("{origin}/api/notifications"))
+        .bearer_auth(KEY)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["destinations"][0]["credential_source"], "external");
+    assert_eq!(status["destinations"][0]["credential_ready"], true);
+}
+
+#[tokio::test]
 async fn managed_credentials_work_when_the_configured_auth_path_is_a_symlink() {
     // Like Fedora Atomic's /home -> /var/home, the operator's path reaches the real directory through a link.
     let temp = Temp::new();

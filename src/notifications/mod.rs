@@ -231,11 +231,8 @@ pub struct Service {
 impl Service {
     /// Capture startup-only secret paths and network permissions without creating monitoring state.
     pub fn new(cfg: &AppConfig) -> Self {
-        // Links in the configured paths (such as /home -> /var/home) are the operator's choice and
-        // are resolved once here; the credential checks still reject any link inside the result.
-        let resolve = |path: PathBuf| std::fs::canonicalize(&path).unwrap_or(path);
-        let root = resolve(cfg.auth_dir());
-        let secrets = resolve(
+        let root = resolve_links(cfg.auth_dir());
+        let secrets = resolve_links(
             cfg.notifications
                 .secrets_dir
                 .as_ref()
@@ -468,6 +465,25 @@ impl Service {
                 .values()
                 .any(|w| w.exhausted && w.reset.is_some_and(|reset| reset + chrono::Duration::seconds(5) <= now))
         })
+    }
+}
+/// Links in a configured path (such as /home -> /var/home) are the operator's choice, so they are
+/// resolved once at startup; the credential checks still reject any link inside the result. Parts
+/// that do not exist yet are kept as written under the deepest existing directory.
+fn resolve_links(path: PathBuf) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut existing = path.as_path();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(existing) {
+            return missing.iter().rev().fold(real, |path, part| path.join(part));
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(part)) => {
+                missing.push(part);
+                existing = parent;
+            }
+            _ => return path,
+        }
     }
 }
 /// Restrict monitoring to Claude/Codex OAuth subscriptions using native provider endpoints.
