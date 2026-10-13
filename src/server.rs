@@ -19,6 +19,9 @@ use crate::ir::Format;
 use crate::proxy::{self, Call, FrameStream, Reply};
 use crate::state::App;
 
+mod request_body;
+
+/// Build API routes with authentication before bounded decoding and body extraction.
 pub fn router(app: Arc<App>) -> Router {
     let api = Router::new()
         .route("/v1/chat/completions", post(chat))
@@ -34,8 +37,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/v1/models", get(models))
         .route("/v1beta/models", get(gemini_models))
         .route("/v1beta/models/{*rest}", post(gemini))
+        .layer(middleware::from_fn_with_state(app.clone(), request_body::decoded_body))
+        .layer(middleware::from_fn_with_state(app.clone(), request_body::encoded_body))
         .layer(middleware::from_fn_with_state(app.clone(), client_auth))
-        .layer(DefaultBodyLimit::max(256 << 20))
+        .layer(DefaultBodyLimit::max(request_body::MAX_BODY_SIZE))
         .layer(CorsLayer::permissive());
 
     Router::new()
@@ -90,18 +95,24 @@ fn format_for_path(path: &str) -> Format {
 
 // -------------------------------------------------------------------- handlers
 
-fn parse_body(format: Format, body: &Bytes) -> Result<Value, Box<Response>> {
-    serde_json::from_slice::<Value>(body).ok().filter(Value::is_object).ok_or_else(|| {
-        Box::new(reply(
-            format,
-            Reply::Error(400, formats::error_body(format, 400, "request body must be a JSON object")),
-            false,
-        ))
-    })
+/// Parse a decoded JSON object and record malformed or non-object input as a request failure.
+fn parse_body(app: &Arc<App>, format: Format, body: &Bytes) -> Result<Value, Box<Response>> {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .filter(Value::is_object)
+        .ok_or_else(|| Box::new(body_error(app, format, 400, "request body must be a JSON object")))
 }
 
+/// Record a body rejection with zero provider attempts and return the format-specific error.
+fn body_error(app: &Arc<App>, format: Format, status: u16, message: &str) -> Response {
+    let mut tracker = proxy::Tracker::new(app, format, false, "http", "");
+    tracker.finish(status, &crate::ir::Usage::default(), Some(message.into()));
+    reply(format, Reply::Error(status, formats::error_body(format, status, message)), false)
+}
+
+/// Validate a decoded text-generation body, execute it, and format the HTTP response.
 async fn run(app: Arc<App>, format: Format, headers: HeaderMap, body: Bytes) -> Response {
-    let body = match parse_body(format, &body) {
+    let body = match parse_body(&app, format, &body) {
         Ok(v) => v,
         Err(r) => return *r,
     };
@@ -147,13 +158,15 @@ fn outcome(o: crate::media::Outcome) -> Response {
     }
 }
 
+/// Validate decoded JSON before submitting an image-generation request.
 async fn image_generations(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> Response {
-    match parse_body(Format::Chat, &body) {
+    match parse_body(&app, Format::Chat, &body) {
         Ok(v) => outcome(crate::media::images(app, headers, v, false).await),
         Err(r) => *r,
     }
 }
 
+/// Convert a decoded multipart or JSON body into an image-edit request.
 async fn image_edits(State(app): State<Arc<App>>, req: Request) -> Response {
     let headers = req.headers().clone();
     let multipart =
@@ -168,11 +181,11 @@ async fn image_edits(State(app): State<Arc<App>>, req: Request) -> Response {
             Err(e) => return outcome(Err((400, formats::error_body(Format::Chat, 400, &e)))),
         }
     } else {
-        let bytes = match axum::body::to_bytes(req.into_body(), 256 << 20).await {
+        let bytes = match axum::body::to_bytes(req.into_body(), request_body::MAX_BODY_SIZE).await {
             Ok(b) => b,
             Err(e) => return outcome(Err((400, formats::error_body(Format::Chat, 400, &e.to_string())))),
         };
-        match parse_body(Format::Chat, &bytes) {
+        match parse_body(&app, Format::Chat, &bytes) {
             Ok(v) => v,
             Err(r) => return *r,
         }
@@ -180,6 +193,7 @@ async fn image_edits(State(app): State<Arc<App>>, req: Request) -> Response {
     outcome(crate::media::images(app, headers, body, true).await)
 }
 
+/// Validate the video operation and decoded JSON before submitting a media request.
 async fn video_create(
     State(app): State<Arc<App>>,
     Path(kind): Path<String>,
@@ -189,7 +203,7 @@ async fn video_create(
     if !matches!(kind.as_str(), "generations" | "edits" | "extensions") {
         return outcome(Err((404, formats::error_body(Format::Chat, 404, "unknown video endpoint"))));
     }
-    match parse_body(Format::Chat, &body) {
+    match parse_body(&app, Format::Chat, &body) {
         Ok(v) => outcome(crate::media::video_create(app, headers, v, &kind).await),
         Err(r) => *r,
     }
@@ -199,8 +213,9 @@ async fn video_status(State(app): State<Arc<App>>, Path(id): Path<String>, heade
     outcome(crate::media::video_status(app, headers, id).await)
 }
 
+/// Validate decoded JSON before forwarding a Responses compaction request.
 async fn compact(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> Response {
-    match parse_body(Format::Responses, &body) {
+    match parse_body(&app, Format::Responses, &body) {
         Ok(v) => outcome(crate::media::compact(app, headers, v).await),
         Err(r) => *r,
     }
@@ -208,7 +223,7 @@ async fn compact(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -
 
 /// Legacy `/v1/completions`, served through the chat pipeline.
 async fn completions(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> Response {
-    let body = match parse_body(Format::Chat, &body) {
+    let body = match parse_body(&app, Format::Chat, &body) {
         Ok(v) => v,
         Err(r) => return *r,
     };
@@ -287,13 +302,15 @@ async fn completions(State(app): State<Arc<App>>, headers: HeaderMap, body: Byte
     }
 }
 
+/// Validate decoded JSON before counting tokens in the Claude request format.
 async fn count_tokens(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> Response {
-    match parse_body(Format::Claude, &body) {
+    match parse_body(&app, Format::Claude, &body) {
         Ok(v) => axum::Json(proxy::count_tokens(app, headers, v).await).into_response(),
         Err(r) => *r,
     }
 }
 
+/// Dispatch Gemini generation or token-count actions from the URL and decoded JSON body.
 async fn gemini(
     State(app): State<Arc<App>>,
     Path(rest): Path<String>,
@@ -308,7 +325,7 @@ async fn gemini(
             false,
         );
     };
-    let body = match parse_body(Format::Gemini, &body) {
+    let body = match parse_body(&app, Format::Gemini, &body) {
         Ok(v) => v,
         Err(r) => return *r,
     };

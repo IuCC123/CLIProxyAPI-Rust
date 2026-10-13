@@ -15,6 +15,7 @@ readme = "README.md"
 anyhow = "1"
 arc-swap = "1"
 async-stream = "0.3"
+async-compression = { version = "0.4", features = ["tokio", "gzip", "zstd"] }
 axum = { version = "0.8", features = ["ws", "macros", "multipart"] }
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 base64 = "0.22"
@@ -26,6 +27,7 @@ flate2 = "1"
 fs2 = "0.4"
 futures = "0.3"
 hex = "0.4"
+http-body-util = "0.1"
 open = "5"
 parking_lot = "0.12"
 rand = "0.9"
@@ -37,6 +39,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
 tokio-tungstenite = { version = "0.27", features = ["rustls-tls-native-roots"] }
 tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
@@ -44,6 +47,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 yaml-edit = { version = "0.3.2", default-features = false }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+zstd = "0.14"
 
 [profile.release]
 lto = "thin"
