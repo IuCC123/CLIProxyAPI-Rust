@@ -537,6 +537,11 @@ async fn dispatch(
             retry_after,
         };
     }
+    // Only these platforms acknowledge in the body. For the rest the 2xx is the acknowledgement,
+    // and a body that fails to arrive must not resend a message the receiver already took.
+    if !matches!(d.format, Format::Slack | Format::Mattermost | Format::Telegram) {
+        return Outcome { success: true, retry: false, status: Some(status), reason: "accepted", retry_after: None };
+    }
     let mut bytes = Vec::new();
     loop {
         match response.chunk().await {
@@ -792,6 +797,19 @@ mod tests {
                 }),
             )
             .route("/large", post(|| async { vec![b'x'; 65537] }))
+            .route(
+                "/cut-off",
+                post(|| async {
+                    use futures::StreamExt;
+                    // The status and first bytes arrive before the connection drops.
+                    let partial = futures::stream::iter([Ok(axum::body::Bytes::from("partial"))]);
+                    let lost = futures::stream::once(async {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        Err(std::io::Error::other("connection lost"))
+                    });
+                    Body::from_stream(partial.chain(lost))
+                }),
+            )
             .route("/slack", post(|| async { "ok" }))
             .route("/telegram", post(|| async { r#"{"ok":false,"description":"secret-body-sentinel"}"# }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -848,9 +866,27 @@ mod tests {
             &Presentation::new(None, chrono_tz::UTC),
         )
         .await;
+        assert_eq!((oversized.success, oversized.reason), (true, "accepted"));
+        let cut_off = dispatch(
+            client.clone(),
+            credentials("cut-off"),
+            &destination,
+            &event,
+            &Presentation::new(None, chrono_tz::UTC),
+        )
+        .await;
+        assert_eq!((cut_off.success, cut_off.retry, cut_off.reason), (true, false, "accepted"));
+        destination.format = Format::Slack;
+        let oversized = dispatch(
+            client.clone(),
+            credentials("large"),
+            &destination,
+            &event,
+            &Presentation::new(None, chrono_tz::UTC),
+        )
+        .await;
         assert_eq!(oversized.reason, "response_too_large");
         assert!(!oversized.retry);
-        destination.format = Format::Slack;
         assert!(
             dispatch(
                 client.clone(),
