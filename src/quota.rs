@@ -178,9 +178,8 @@ pub fn observe(acct: &Account, headers: &reqwest::header::HeaderMap, epoch: u64)
         Provider::Claude => {
             for (key, name) in [("5h", "5h"), ("7d", "week")] {
                 let rejected = h(&format!("anthropic-ratelimit-unified-{key}-status")) == Some("rejected");
-                let Some(u) = num(&format!("anthropic-ratelimit-unified-{key}-utilization"))
-                    .filter(|v| (0.0..=1.0).contains(v))
-                    .or_else(|| rejected.then_some(1.0))
+                let Some(u) =
+                    num(&format!("anthropic-ratelimit-unified-{key}-utilization")).or_else(|| rejected.then_some(1.0))
                 else {
                     continue;
                 };
@@ -194,9 +193,7 @@ pub fn observe(acct: &Account, headers: &reqwest::header::HeaderMap, epoch: u64)
                 let minutes = num(&format!("x-codex-{which}-window-minutes"))
                     .filter(|v| (1.0..=525600.0).contains(v))
                     .unwrap_or(0.0) as i64;
-                let Some(used) =
-                    num(&format!("x-codex-{which}-used-percent")).filter(|v| minutes > 0 && (0.0..=100.0).contains(v))
-                else {
+                let Some(used) = num(&format!("x-codex-{which}-used-percent")).filter(|_| minutes > 0) else {
                     continue;
                 };
                 let reset = num(&format!("x-codex-{which}-reset-at")).and_then(|t| ts(t as i64)).or_else(|| {
@@ -243,7 +240,7 @@ pub fn observe_codex_event(acct: &Account, v: &Value, epoch: u64) {
             });
             Some(Window {
                 name: label(minutes * 60),
-                used: w["used_percent"].as_f64().filter(|v| v.is_finite() && (0.0..=100.0).contains(v))?,
+                used: w["used_percent"].as_f64()?.clamp(0.0, 100.0),
                 resets_at: reset,
                 model: None,
             })
@@ -273,7 +270,7 @@ fn claude_windows(v: &Value) -> Vec<Window> {
         let w = &v[*key];
         Some(Window {
             name: (*name).into(),
-            used: w["utilization"].as_f64().filter(|v| v.is_finite() && (0.0..=100.0).contains(v))?,
+            used: w["utilization"].as_f64()?.clamp(0.0, 100.0),
             resets_at: rfc(&w["resets_at"]),
             model: model.map(String::from),
         })
@@ -290,7 +287,7 @@ fn codex_windows(v: &Value) -> Vec<Window> {
         .filter_map(|key| {
             let w = &rl[*key];
             let secs = w["limit_window_seconds"].as_i64().filter(|s| (1..=31536000).contains(s))?;
-            let used = w["used_percent"].as_f64().filter(|v| v.is_finite() && (0.0..=100.0).contains(v))?;
+            let used = w["used_percent"].as_f64()?;
             let reset = w["reset_at"].as_i64().and_then(ts);
             let used = if reached && used >= 99.0 { 100.0 } else { used.clamp(0.0, 100.0) };
             Some(Window { name: label(secs), used, resets_at: reset, model: None })
@@ -646,6 +643,43 @@ mod tests {
             "secondary_window": null } });
         let w = codex_windows(&codex);
         assert_eq!((w[0].name.as_str(), w[0].used), ("week", 31.0));
+    }
+
+    #[test]
+    fn readings_past_the_limit_count_as_exhausted() {
+        let w = claude_windows(&json!({"five_hour": {"utilization": 104.0}}));
+        assert_eq!((w[0].name.as_str(), w[0].used), ("5h", 100.0));
+        let w = codex_windows(
+            &json!({"rate_limit": {"primary_window": {"used_percent": 101, "limit_window_seconds": 18000}}}),
+        );
+        assert_eq!((w[0].name.as_str(), w[0].used), ("5h", 100.0));
+
+        let cfg = crate::config::Config {
+            auth_dir: "/nonexistent".into(),
+            claude_api_key: vec![crate::config::KeyEntry { api_key: "c".into(), ..Default::default() }],
+            codex_api_key: vec![crate::config::KeyEntry { api_key: "x".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let pool = crate::accounts::Pool::default();
+        pool.reload(&cfg);
+        let header = |name: &'static str, value: &str| {
+            (reqwest::header::HeaderName::from_static(name), reqwest::header::HeaderValue::from_str(value).unwrap())
+        };
+        for acct in pool.all() {
+            let headers = reqwest::header::HeaderMap::from_iter(match acct.provider {
+                Provider::Claude => vec![
+                    header("anthropic-ratelimit-unified-5h-utilization", "1.02"),
+                    header("anthropic-ratelimit-unified-7d-utilization", "inf"),
+                ],
+                _ => {
+                    vec![header("x-codex-primary-window-minutes", "300"), header("x-codex-primary-used-percent", "103")]
+                }
+            });
+            observe(&acct, &headers, acct.quota_epoch());
+            let st = acct.state.lock();
+            assert_eq!(st.quota.windows.len(), 1, "{:?}", acct.provider);
+            assert_eq!((st.quota.windows[0].name.as_str(), st.quota.windows[0].used), ("5h", 100.0));
+        }
     }
 
     #[test]
