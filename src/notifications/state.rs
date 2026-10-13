@@ -117,12 +117,19 @@ impl Subscription {
                 });
             }
         }
+        let full_poll = observation.authoritative
+            && observation.windows.iter().any(|w| w.name == "5h" && w.model.is_none())
+            && observation.windows.iter().any(|w| w.name == "week" && w.model.is_none());
+        // A full usage poll that leaves out a window the provider used to report means it no
+        // longer applies; keeping it would stop every later recovery from being confirmed.
+        if full_poll {
+            self.windows.retain(|_, old| {
+                old.exhausted || observation.windows.iter().any(|w| w.name == old.name && w.model == old.model)
+            });
+        }
         // An unscoped quota rejection only clears after fresh authoritative observations
         // cover both shared windows AND every previously learned applicable model window.
-        if observation.authoritative
-            && observation.windows.iter().any(|w| w.name == "5h" && w.model.is_none())
-            && observation.windows.iter().any(|w| w.name == "week" && w.model.is_none())
-        {
+        if full_poll {
             for unknown in self.windows.values().filter(|w| w.name == "unknown" && w.exhausted) {
                 let covered = self
                     .windows

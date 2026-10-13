@@ -344,6 +344,33 @@ async fn headerless_quota_rejection_does_not_poll_every_minute() {
     let _ = task.await;
 }
 #[tokio::test]
+async fn recovery_is_sent_after_the_provider_stops_reporting_a_learned_window() {
+    let (temp, app, acct) = fixture(true);
+    let task = tokio::spawn(worker(app.clone()));
+    let opus = crate::quota::Window { model: Some("opus".into()), ..sample("week opus", 30.0) };
+    crate::quota::authoritative(&mut acct.state.lock(), vec![sample("5h", 10.0), sample("week", 20.0), opus], None);
+    consumed(&app, &acct).await;
+    task.abort();
+    let _ = task.await;
+    let cfg = (*app.cfg()).clone();
+    drop(acct);
+    drop(app);
+    // After a restart, usage stops reporting the Opus window.
+    let app = App::new(cfg, temp.0.join("config.yaml"));
+    let acct = app.pool.all()[0].clone();
+    let task = tokio::spawn(worker(app.clone()));
+    crate::quota::authoritative(&mut acct.state.lock(), vec![sample("5h", 100.0), sample("week", 20.0)], None);
+    until_logs(&app, 1).await;
+    crate::quota::authoritative(&mut acct.state.lock(), vec![sample("5h", 10.0), sample("week", 20.0)], None);
+    until_logs(&app, 2).await;
+    let status = app.notifications.status(&app);
+    let events: Vec<_> = status["logs"].as_array().unwrap().iter().map(|log| log["event"].clone()).collect();
+    assert_eq!(events, [json!("quota.exhausted"), json!("quota.available")]);
+    assert_eq!(status["pending"], 0);
+    task.abort();
+    let _ = task.await;
+}
+#[tokio::test]
 async fn persisted_available_after_restart_waits_for_all_fresh_authoritative_windows() {
     let (temp, app, acct) = fixture(true);
     seed_pending(&app, &acct, "quota.available");
